@@ -1,57 +1,61 @@
 {
-    "name": "campelo/laravel-typescript-models",
-    "description": "Automatically generate TypeScript interfaces from your Laravel Eloquent models via API endpoint",
-    "type": "library",
-    "license": "MIT",
-    "keywords": [
-        "laravel",
-        "typescript",
-        "models",
-        "interfaces",
-        "eloquent",
-        "code-generation"
-    ],
-    "authors": [
-        {
-            "name": "Campelo Neto",
-            "email": "campeloneto1@gmail.com"
-        },
-        {
-            "name": "Arthur Rocha",
-            "email": "arthurrocha2101@gmail.com"
-        }
-    ],
-    "homepage": "https://github.com/campelo/laravel-typescript-models",
-    "require": {
-        "php": "^8.1",
-        "illuminate/support": "^10.0|^11.0|^12.0",
-        "illuminate/routing": "^10.0|^11.0|^12.0",
-        "illuminate/filesystem": "^10.0|^11.0|^12.0"
+  "name": "campelo/laravel-typescript-models",
+  "description": "Automatically generate TypeScript interfaces from your Laravel Eloquent models via API endpoint",
+  "type": "library",
+  "license": "MIT",
+  "keywords": [
+    "laravel",
+    "typescript",
+    "models",
+    "interfaces",
+    "eloquent",
+    "code-generation"
+  ],
+  "authors": [
+    {
+      "name": "Campelo Neto",
+      "email": "campeloneto1@gmail.com"
     },
-    "require-dev": {
-        "orchestra/testbench": "^8.0|^9.0",
-        "phpunit/phpunit": "^10.0|^11.0"
+    {
+      "name": "Arthur Rocha",
+      "email": "arthurrocha2101@gmail.com"
     },
-    "autoload": {
-        "psr-4": {
-            "Campelo\\LaravelTypescriptModels\\": "src/"
-        }
-    },
-    "autoload-dev": {
-        "psr-4": {
-            "Campelo\\LaravelTypescriptModels\\Tests\\": "tests/"
-        }
-    },
-    "extra": {
-        "laravel": {
-            "providers": [
-                "Campelo\\LaravelTypescriptModels\\TypeScriptModelsServiceProvider"
-            ]
-        }
-    },
-    "minimum-stability": "stable",
-    "prefer-stable": true,
-    "config": {
-        "sort-packages": true
+    {
+      "name": "Ruan Serra",
+      "email": "ruan.4321.pablo@gmail.com"
     }
+  ],
+  "homepage": "https://github.com/campelo/laravel-typescript-models",
+  "require": {
+    "php": "^8.1",
+    "illuminate/support": "^10.0|^11.0|^12.0",
+    "illuminate/routing": "^10.0|^11.0|^12.0",
+    "illuminate/filesystem": "^10.0|^11.0|^12.0"
+  },
+  "require-dev": {
+    "orchestra/testbench": "^8.0|^9.0",
+    "phpunit/phpunit": "^10.0|^11.0"
+  },
+  "autoload": {
+    "psr-4": {
+      "Campelo\\LaravelTypescriptModels\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "Campelo\\LaravelTypescriptModels\\Tests\\": "tests/"
+    }
+  },
+  "extra": {
+    "laravel": {
+      "providers": [
+        "Campelo\\LaravelTypescriptModels\\TypeScriptModelsServiceProvider"
+      ]
+    }
+  },
+  "minimum-stability": "stable",
+  "prefer-stable": true,
+  "config": {
+    "sort-packages": true
+  }
 }
