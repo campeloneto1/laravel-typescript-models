@@ -161,4 +161,16 @@ return [
     'exclude_requests' => [
         // App\Http\Requests\SomeRequest::class,
     ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Generate Yup Schemas
+    |--------------------------------------------------------------------------
+    |
+    | Whether to generate Yup validation schemas from Form Requests.
+    | This creates client-side validation that mirrors your Laravel rules.
+    | Requires 'include_requests' to be enabled.
+    |
+    */
+    'generate_yup_schemas' => env('TYPESCRIPT_MODELS_GENERATE_YUP_SCHEMAS', true),
 ];

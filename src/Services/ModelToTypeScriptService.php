@@ -105,8 +105,9 @@ class ModelToTypeScriptService
                 . "\n";
         }
 
-        // Generate Form Request interfaces
+        // Generate Form Request interfaces and Yup schemas
         $requestInterfaces = [];
+        $yupSchemas = [];
 
         if (config('typescript-models.include_requests', true)) {
             $this->discoveredRequests = $this->discoverRequests();
@@ -122,6 +123,14 @@ class ModelToTypeScriptService
                 if ($result) {
                     $requestInterfaces[] = $result;
                 }
+
+                // Generate Yup schema if enabled
+                if (config('typescript-models.generate_yup_schemas', true)) {
+                    $schema = $this->requestToYupSchema($requestClass);
+                    if ($schema) {
+                        $yupSchemas[] = $schema;
+                    }
+                }
             }
         }
 
@@ -129,6 +138,14 @@ class ModelToTypeScriptService
         if (!empty($requestInterfaces)) {
             $output .= "\n// Form Request Interfaces\n"
                 . implode("\n\n", $requestInterfaces)
+                . "\n";
+        }
+
+        // Yup schemas
+        if (!empty($yupSchemas)) {
+            $output .= "\n// Yup Validation Schemas\n"
+                . "// Usage: import * as yup from 'yup';\n"
+                . implode("\n\n", $yupSchemas)
                 . "\n";
         }
 
@@ -799,6 +816,277 @@ TS;
                 case 'ipv4':
                 case 'ipv6':
                 case 'mac_address':
+                case 'regex':
+                case 'alpha':
+                case 'alpha_dash':
+                case 'alpha_num':
+                    return 'string';
+            }
+        }
+
+        // Default to string
+        return 'string';
+    }
+
+    /**
+     * Convert a Form Request class to a Yup validation schema.
+     */
+    protected function requestToYupSchema(string $requestClass): ?string
+    {
+        try {
+            $reflection = new ReflectionClass($requestClass);
+            $schemaName = ($this->requestNames[$requestClass] ?? $reflection->getShortName()) . 'Schema';
+
+            // Try to get rules by instantiating and calling rules()
+            $rules = $this->getRequestRules($requestClass);
+
+            // Fallback to static analysis if execution failed
+            if (empty($rules)) {
+                return null;
+            }
+
+            $fields = $this->validationRulesToYup($rules);
+
+            if (empty($fields)) {
+                return null;
+            }
+
+            $fieldsString = implode(",\n", array_map(
+                fn($field) => "  {$field['name']}: {$field['schema']}",
+                $fields
+            ));
+
+            return "export const {$schemaName} = yup.object({\n{$fieldsString},\n});";
+        } catch (\Throwable $e) {
+            return "// Error generating Yup schema for {$requestClass}: {$e->getMessage()}";
+        }
+    }
+
+    /**
+     * Get validation rules from a Form Request class.
+     */
+    protected function getRequestRules(string $requestClass): array
+    {
+        try {
+            $formRequest = new $requestClass();
+            $formRequest->setContainer(app());
+
+            if (!method_exists($formRequest, 'rules')) {
+                return [];
+            }
+
+            $rules = $formRequest->rules();
+
+            return is_array($rules) ? $rules : [];
+        } catch (\Throwable $e) {
+            return [];
+        }
+    }
+
+    /**
+     * Convert Laravel validation rules to Yup schema fields.
+     */
+    protected function validationRulesToYup(array $rules): array
+    {
+        $fields = [];
+        $seenKeys = [];
+
+        foreach ($rules as $field => $fieldRules) {
+            // Handle nested rules like 'items.*' or 'items.*.name'
+            $baseField = explode('.', $field)[0];
+
+            if (isset($seenKeys[$baseField])) {
+                continue;
+            }
+            $seenKeys[$baseField] = true;
+
+            // Normalize rules to array
+            if (is_string($fieldRules)) {
+                $fieldRules = explode('|', $fieldRules);
+            }
+
+            // Convert Rule objects to strings where possible
+            $rulesArray = [];
+            $rulesWithParams = [];
+
+            foreach ($fieldRules as $rule) {
+                if (is_string($rule)) {
+                    $rulesArray[] = strtolower(explode(':', $rule)[0]);
+                    $rulesWithParams[] = strtolower($rule);
+                } elseif (is_object($rule)) {
+                    $rulesArray[] = strtolower(class_basename($rule));
+                    $rulesWithParams[] = strtolower(class_basename($rule));
+                }
+            }
+
+            $schema = $this->buildYupSchema($rulesArray, $rulesWithParams, $field);
+
+            $fields[] = [
+                'name' => $baseField,
+                'schema' => $schema,
+            ];
+        }
+
+        return $fields;
+    }
+
+    /**
+     * Build a Yup schema string from Laravel validation rules.
+     */
+    protected function buildYupSchema(array $rules, array $rulesWithParams, string $field): string
+    {
+        $schema = [];
+
+        // Determine base type
+        $baseType = $this->getYupBaseType($rules, $field);
+        $schema[] = "yup.{$baseType}()";
+
+        // Add validations based on rules
+        foreach ($rulesWithParams as $rule) {
+            $parts = explode(':', $rule);
+            $ruleName = $parts[0];
+            $params = isset($parts[1]) ? explode(',', $parts[1]) : [];
+
+            switch ($ruleName) {
+                case 'required':
+                    $schema[] = "required('This field is required')";
+                    break;
+
+                case 'nullable':
+                    $schema[] = "nullable()";
+                    break;
+
+                case 'email':
+                    $schema[] = "email('Invalid email address')";
+                    break;
+
+                case 'url':
+                    $schema[] = "url('Invalid URL')";
+                    break;
+
+                case 'min':
+                    if (!empty($params[0])) {
+                        if (in_array('string', $rules)) {
+                            $schema[] = "min({$params[0]}, 'Must be at least {$params[0]} characters')";
+                        } else {
+                            $schema[] = "min({$params[0]}, 'Must be at least {$params[0]}')";
+                        }
+                    }
+                    break;
+
+                case 'max':
+                    if (!empty($params[0])) {
+                        if (in_array('string', $rules)) {
+                            $schema[] = "max({$params[0]}, 'Must be at most {$params[0]} characters')";
+                        } else {
+                            $schema[] = "max({$params[0]}, 'Must be at most {$params[0]}')";
+                        }
+                    }
+                    break;
+
+                case 'between':
+                    if (count($params) >= 2) {
+                        $schema[] = "min({$params[0]})";
+                        $schema[] = "max({$params[1]})";
+                    }
+                    break;
+
+                case 'size':
+                    if (!empty($params[0])) {
+                        if (in_array('string', $rules)) {
+                            $schema[] = "length({$params[0]}, 'Must be exactly {$params[0]} characters')";
+                        }
+                    }
+                    break;
+
+                case 'confirmed':
+                    $schema[] = "oneOf([yup.ref('{$field}_confirmation')], 'Must match confirmation')";
+                    break;
+
+                case 'regex':
+                    if (!empty($params[0])) {
+                        // Remove delimiters from regex
+                        $pattern = trim($params[0], '/');
+                        $schema[] = "matches(/{$pattern}/, 'Invalid format')";
+                    }
+                    break;
+
+                case 'in':
+                    if (!empty($params)) {
+                        $values = implode("', '", $params);
+                        $schema[] = "oneOf(['{$values}'], 'Invalid value')";
+                    }
+                    break;
+
+                case 'uuid':
+                    $schema[] = "uuid('Invalid UUID')";
+                    break;
+
+                case 'integer':
+                    $schema[] = "integer('Must be an integer')";
+                    break;
+
+                case 'positive':
+                    $schema[] = "positive('Must be positive')";
+                    break;
+
+                case 'negative':
+                    $schema[] = "negative('Must be negative')";
+                    break;
+            }
+        }
+
+        // If not required and not nullable, make it optional
+        if (!in_array('required', $rules) && !in_array('nullable', $rules)) {
+            $schema[] = "optional()";
+        }
+
+        return implode('.', $schema);
+    }
+
+    /**
+     * Determine the base Yup type from Laravel rules.
+     */
+    protected function getYupBaseType(array $rules, string $field): string
+    {
+        // Check for array type first
+        if (str_contains($field, '.*') || in_array('array', $rules)) {
+            return 'array';
+        }
+
+        // Check for specific types
+        foreach ($rules as $rule) {
+            switch ($rule) {
+                case 'integer':
+                case 'numeric':
+                case 'digits':
+                case 'digits_between':
+                    return 'number';
+
+                case 'boolean':
+                case 'bool':
+                case 'accepted':
+                case 'declined':
+                    return 'boolean';
+
+                case 'array':
+                    return 'array';
+
+                case 'date':
+                case 'date_format':
+                    return 'date';
+
+                case 'file':
+                case 'image':
+                case 'mimes':
+                case 'mimetypes':
+                    return 'mixed'; // Yup doesn't have a file type
+
+                case 'string':
+                case 'email':
+                case 'url':
+                case 'uuid':
+                case 'ip':
                 case 'regex':
                 case 'alpha':
                 case 'alpha_dash':
