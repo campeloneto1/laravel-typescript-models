@@ -13,6 +13,8 @@ use Illuminate\Database\Eloquent\Relations\MorphMany;
 use Illuminate\Database\Eloquent\Relations\MorphOne;
 use Illuminate\Database\Eloquent\Relations\MorphTo;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
+use Illuminate\Http\Request;
+use Illuminate\Http\Resources\Json\JsonResource;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
@@ -22,10 +24,12 @@ use ReflectionMethod;
 class ModelToTypeScriptService
 {
     protected array $discoveredModels = [];
+    protected array $discoveredResources = [];
     protected array $modelNames = [];
+    protected array $resourceNames = [];
 
     /**
-     * Generate TypeScript interfaces for all discovered models.
+     * Generate TypeScript interfaces for all discovered models and resources.
      */
     public function generate(): string
     {
@@ -36,34 +40,69 @@ class ModelToTypeScriptService
             $this->modelNames[$modelClass] = class_basename($modelClass);
         }
 
-        $interfaces = [];
-        $types = [];
-        $paginatedTypes = [];
+        $modelInterfaces = [];
+        $modelTypes = [];
+        $modelPaginatedTypes = [];
 
         foreach ($this->discoveredModels as $modelClass) {
             $result = $this->modelToInterface($modelClass);
             if ($result) {
-                $interfaces[] = $result['interface'];
-                $types[] = $result['type'];
-                $paginatedTypes[] = $result['paginated'];
+                $modelInterfaces[] = $result['interface'];
+                $modelTypes[] = $result['type'];
+                $modelPaginatedTypes[] = $result['paginated'];
+            }
+        }
+
+        // Generate Resource interfaces
+        $resourceInterfaces = [];
+        $resourceTypes = [];
+        $resourcePaginatedTypes = [];
+
+        if (config('typescript-models.include_resources', true)) {
+            $this->discoveredResources = $this->discoverResources();
+
+            foreach ($this->discoveredResources as $resourceClass) {
+                $this->resourceNames[$resourceClass] = class_basename($resourceClass);
+            }
+
+            foreach ($this->discoveredResources as $resourceClass) {
+                $result = $this->resourceToInterface($resourceClass);
+                if ($result) {
+                    $resourceInterfaces[] = $result['interface'];
+                    $resourceTypes[] = $result['type'];
+                    $resourcePaginatedTypes[] = $result['paginated'];
+                }
             }
         }
 
         $header = $this->generateHeader();
         $paginationInterfaces = $this->generatePaginationInterfaces();
-        $interfacesString = implode("\n\n", $interfaces);
-        $typesString = implode("\n", $types);
-        $paginatedTypesString = implode("\n", $paginatedTypes);
 
-        return $header
-            . $paginationInterfaces
-            . "\n// Model Interfaces\n"
-            . $interfacesString
-            . "\n\n// Array Types\n"
-            . $typesString
-            . "\n\n// Paginated Types\n"
-            . $paginatedTypesString
-            . "\n";
+        $output = $header . $paginationInterfaces;
+
+        // Model interfaces
+        if (!empty($modelInterfaces)) {
+            $output .= "\n// Model Interfaces\n"
+                . implode("\n\n", $modelInterfaces)
+                . "\n\n// Model Array Types\n"
+                . implode("\n", $modelTypes)
+                . "\n\n// Model Paginated Types\n"
+                . implode("\n", $modelPaginatedTypes)
+                . "\n";
+        }
+
+        // Resource interfaces
+        if (!empty($resourceInterfaces)) {
+            $output .= "\n// Resource Interfaces\n"
+                . implode("\n\n", $resourceInterfaces)
+                . "\n\n// Resource Array Types\n"
+                . implode("\n", $resourceTypes)
+                . "\n\n// Resource Paginated Types\n"
+                . implode("\n", $resourcePaginatedTypes)
+                . "\n";
+        }
+
+        return $output;
     }
 
     /**
@@ -158,6 +197,48 @@ TS;
     }
 
     /**
+     * Discover all API Resources in the configured paths.
+     */
+    protected function discoverResources(): array
+    {
+        $paths = config('typescript-models.resources_paths', [app_path('Http/Resources')]);
+        $excludeResources = config('typescript-models.exclude_resources', []);
+        $resources = [];
+
+        foreach ($paths as $path) {
+            if (!File::isDirectory($path)) {
+                continue;
+            }
+
+            foreach (File::allFiles($path) as $file) {
+                $class = $this->getClassFromFile($file->getPathname());
+
+                if (!$class) {
+                    continue;
+                }
+
+                if (!class_exists($class)) {
+                    continue;
+                }
+
+                if (!is_subclass_of($class, JsonResource::class)) {
+                    continue;
+                }
+
+                if (in_array($class, $excludeResources)) {
+                    continue;
+                }
+
+                $resources[] = $class;
+            }
+        }
+
+        sort($resources);
+
+        return $resources;
+    }
+
+    /**
      * Extract the fully qualified class name from a PHP file.
      */
     protected function getClassFromFile(string $filePath): ?string
@@ -223,6 +304,201 @@ TS;
                 'paginated' => '',
             ];
         }
+    }
+
+    /**
+     * Convert a resource class to a TypeScript interface.
+     */
+    protected function resourceToInterface(string $resourceClass): ?array
+    {
+        try {
+            $reflection = new ReflectionClass($resourceClass);
+            $interfaceName = $reflection->getShortName();
+            $pluralName = Str::plural($interfaceName);
+
+            // Try to get properties by executing toArray with a fake model
+            $properties = $this->getResourcePropertiesByExecution($resourceClass, $reflection);
+
+            // Fallback to static analysis if execution failed
+            if (empty($properties)) {
+                $properties = $this->getResourcePropertiesByStaticAnalysis($reflection);
+            }
+
+            if (empty($properties)) {
+                return null;
+            }
+
+            // Sort by name
+            usort($properties, fn($a, $b) => strcmp($a['name'], $b['name']));
+
+            $propertiesString = implode("\n", array_map(
+                fn($prop) => "  {$prop['name']}" . ($prop['nullable'] ? '?' : '') . ": {$prop['type']};",
+                $properties
+            ));
+
+            return [
+                'interface' => "export interface {$interfaceName} {\n{$propertiesString}\n}",
+                'type' => "export type {$pluralName} = {$interfaceName}[];",
+                'paginated' => "export type {$pluralName}Paginated = PaginatedResponse<{$interfaceName}>;",
+            ];
+        } catch (\Throwable $e) {
+            return [
+                'interface' => "// Error generating interface for {$resourceClass}: {$e->getMessage()}",
+                'type' => '',
+                'paginated' => '',
+            ];
+        }
+    }
+
+    /**
+     * Get resource properties by executing toArray with a fake model.
+     */
+    protected function getResourcePropertiesByExecution(string $resourceClass, ReflectionClass $reflection): array
+    {
+        try {
+            // Create an anonymous class that extends Model and returns null for any attribute
+            $fakeModel = new class extends Model {
+                protected $guarded = [];
+
+                public function getAttribute($key)
+                {
+                    return null;
+                }
+
+                public function relationLoaded($key): bool
+                {
+                    return false;
+                }
+
+                public function getRelation($key)
+                {
+                    return null;
+                }
+            };
+
+            $resource = new $resourceClass($fakeModel);
+            $fakeRequest = Request::create('/', 'GET');
+
+            $array = $resource->toArray($fakeRequest);
+
+            if (!is_array($array)) {
+                return [];
+            }
+
+            $properties = [];
+            foreach ($array as $key => $value) {
+                // Skip numeric keys (from array_merge or similar)
+                if (is_numeric($key)) {
+                    continue;
+                }
+
+                $properties[] = [
+                    'name' => $key,
+                    'type' => $this->inferTypeFromValue($value),
+                    'nullable' => true,
+                ];
+            }
+
+            return $properties;
+        } catch (\Throwable $e) {
+            return [];
+        }
+    }
+
+    /**
+     * Get resource properties by static analysis of toArray method.
+     */
+    protected function getResourcePropertiesByStaticAnalysis(ReflectionClass $reflection): array
+    {
+        try {
+            if (!$reflection->hasMethod('toArray')) {
+                return [];
+            }
+
+            $method = $reflection->getMethod('toArray');
+            $filename = $method->getFileName();
+            $startLine = $method->getStartLine();
+            $endLine = $method->getEndLine();
+
+            if (!$filename || !$startLine || !$endLine) {
+                return [];
+            }
+
+            $lines = file($filename);
+            $methodBody = implode('', array_slice($lines, $startLine - 1, $endLine - $startLine + 1));
+
+            // Find array keys in patterns like 'key' => or "key" =>
+            preg_match_all("/['\"]([a-zA-Z_][a-zA-Z0-9_]*)['\"]\s*=>/", $methodBody, $matches);
+
+            $properties = [];
+            $seenKeys = [];
+
+            foreach ($matches[1] as $key) {
+                if (isset($seenKeys[$key])) {
+                    continue;
+                }
+                $seenKeys[$key] = true;
+
+                $properties[] = [
+                    'name' => $key,
+                    'type' => 'any',
+                    'nullable' => true,
+                ];
+            }
+
+            return $properties;
+        } catch (\Throwable $e) {
+            return [];
+        }
+    }
+
+    /**
+     * Infer TypeScript type from a PHP value.
+     */
+    protected function inferTypeFromValue(mixed $value): string
+    {
+        if (is_null($value)) {
+            return 'any';
+        }
+
+        if (is_bool($value)) {
+            return 'boolean';
+        }
+
+        if (is_int($value)) {
+            return 'number';
+        }
+
+        if (is_float($value)) {
+            return 'number';
+        }
+
+        if (is_array($value)) {
+            if (empty($value)) {
+                return 'any[]';
+            }
+
+            // Check if it's an associative array (object) or sequential array
+            if (array_keys($value) !== range(0, count($value) - 1)) {
+                return 'Record<string, any>';
+            }
+
+            return 'any[]';
+        }
+
+        if (is_object($value)) {
+            // Check if it's a JsonResource
+            if ($value instanceof JsonResource) {
+                $resourceName = class_basename($value);
+                if (in_array(get_class($value), $this->discoveredResources)) {
+                    return $resourceName;
+                }
+            }
+
+            return 'Record<string, any>';
+        }
+
+        return 'string';
     }
 
     /**

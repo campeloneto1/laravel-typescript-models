@@ -105,4 +105,32 @@ return [
     |
     */
     'include_relations' => env('TYPESCRIPT_MODELS_INCLUDE_RELATIONS', true),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Include Resources
+    |--------------------------------------------------------------------------
+    |
+    | Whether to generate TypeScript interfaces from API Resources.
+    | This allows generating types that match the actual API response shape,
+    | which may differ from the underlying Model structure.
+    |
+    */
+    'include_resources' => env('TYPESCRIPT_MODELS_INCLUDE_RESOURCES', true),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Resources Configuration
+    |--------------------------------------------------------------------------
+    |
+    | Configure which API Resources to include and how to discover them.
+    |
+    */
+    'resources_paths' => [
+        app_path('Http/Resources'),
+    ],
+
+    'exclude_resources' => [
+        // App\Http\Resources\SomeResource::class,
+    ],
 ];
