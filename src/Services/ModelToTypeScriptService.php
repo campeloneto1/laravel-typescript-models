@@ -38,20 +38,64 @@ class ModelToTypeScriptService
 
         $interfaces = [];
         $types = [];
+        $paginatedTypes = [];
 
         foreach ($this->discoveredModels as $modelClass) {
             $result = $this->modelToInterface($modelClass);
             if ($result) {
                 $interfaces[] = $result['interface'];
                 $types[] = $result['type'];
+                $paginatedTypes[] = $result['paginated'];
             }
         }
 
         $header = $this->generateHeader();
+        $paginationInterfaces = $this->generatePaginationInterfaces();
         $interfacesString = implode("\n\n", $interfaces);
         $typesString = implode("\n", $types);
+        $paginatedTypesString = implode("\n", $paginatedTypes);
 
-        return $header . $interfacesString . "\n\n// Array Types\n" . $typesString . "\n";
+        return $header
+            . $paginationInterfaces
+            . "\n// Model Interfaces\n"
+            . $interfacesString
+            . "\n\n// Array Types\n"
+            . $typesString
+            . "\n\n// Paginated Types\n"
+            . $paginatedTypesString
+            . "\n";
+    }
+
+    /**
+     * Generate pagination-related TypeScript interfaces.
+     */
+    protected function generatePaginationInterfaces(): string
+    {
+        return <<<'TS'
+// Pagination Interfaces
+export interface PaginationLink {
+  url: string | null;
+  label: string;
+  active: boolean;
+}
+
+export interface PaginatedResponse<T> {
+  data: T[];
+  current_page: number;
+  first_page_url: string;
+  from: number | null;
+  last_page: number;
+  last_page_url: string;
+  links: PaginationLink[];
+  next_page_url: string | null;
+  path: string;
+  per_page: number;
+  prev_page_url: string | null;
+  to: number | null;
+  total: number;
+}
+
+TS;
     }
 
     /**
@@ -170,11 +214,13 @@ TS;
             return [
                 'interface' => "export interface {$interfaceName} {\n{$propertiesString}\n}",
                 'type' => "export type {$pluralName} = {$interfaceName}[];",
+                'paginated' => "export type {$pluralName}Paginated = PaginatedResponse<{$interfaceName}>;",
             ];
         } catch (\Throwable $e) {
             return [
                 'interface' => "// Error generating interface for {$modelClass}: {$e->getMessage()}",
                 'type' => '',
+                'paginated' => '',
             ];
         }
     }
