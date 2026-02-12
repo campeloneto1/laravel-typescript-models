@@ -13,6 +13,7 @@ use Illuminate\Database\Eloquent\Relations\MorphMany;
 use Illuminate\Database\Eloquent\Relations\MorphOne;
 use Illuminate\Database\Eloquent\Relations\MorphTo;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
+use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 use Illuminate\Support\Facades\File;
@@ -25,8 +26,10 @@ class ModelToTypeScriptService
 {
     protected array $discoveredModels = [];
     protected array $discoveredResources = [];
+    protected array $discoveredRequests = [];
     protected array $modelNames = [];
     protected array $resourceNames = [];
+    protected array $requestNames = [];
 
     /**
      * Generate TypeScript interfaces for all discovered models and resources.
@@ -99,6 +102,33 @@ class ModelToTypeScriptService
                 . implode("\n", $resourceTypes)
                 . "\n\n// Resource Paginated Types\n"
                 . implode("\n", $resourcePaginatedTypes)
+                . "\n";
+        }
+
+        // Generate Form Request interfaces
+        $requestInterfaces = [];
+
+        if (config('typescript-models.include_requests', true)) {
+            $this->discoveredRequests = $this->discoverRequests();
+
+            // Build names with conflict detection
+            $this->requestNames = $this->buildUniqueNames(
+                $this->discoveredRequests,
+                'App\\Http\\Requests\\'
+            );
+
+            foreach ($this->discoveredRequests as $requestClass) {
+                $result = $this->requestToInterface($requestClass);
+                if ($result) {
+                    $requestInterfaces[] = $result;
+                }
+            }
+        }
+
+        // Request interfaces
+        if (!empty($requestInterfaces)) {
+            $output .= "\n// Form Request Interfaces\n"
+                . implode("\n\n", $requestInterfaces)
                 . "\n";
         }
 
@@ -236,6 +266,48 @@ TS;
         sort($resources);
 
         return $resources;
+    }
+
+    /**
+     * Discover all Form Requests in the configured paths.
+     */
+    protected function discoverRequests(): array
+    {
+        $paths = config('typescript-models.requests_paths', [app_path('Http/Requests')]);
+        $excludeRequests = config('typescript-models.exclude_requests', []);
+        $requests = [];
+
+        foreach ($paths as $path) {
+            if (!File::isDirectory($path)) {
+                continue;
+            }
+
+            foreach (File::allFiles($path) as $file) {
+                $class = $this->getClassFromFile($file->getPathname());
+
+                if (!$class) {
+                    continue;
+                }
+
+                if (!class_exists($class)) {
+                    continue;
+                }
+
+                if (!is_subclass_of($class, FormRequest::class)) {
+                    continue;
+                }
+
+                if (in_array($class, $excludeRequests)) {
+                    continue;
+                }
+
+                $requests[] = $class;
+            }
+        }
+
+        sort($requests);
+
+        return $requests;
     }
 
     /**
@@ -498,6 +570,244 @@ TS;
             return 'Record<string, any>';
         }
 
+        return 'string';
+    }
+
+    /**
+     * Convert a Form Request class to a TypeScript interface.
+     */
+    protected function requestToInterface(string $requestClass): ?string
+    {
+        try {
+            $reflection = new ReflectionClass($requestClass);
+            $interfaceName = $this->requestNames[$requestClass] ?? $reflection->getShortName();
+
+            // Try to get rules by instantiating and calling rules()
+            $properties = $this->getRequestPropertiesByExecution($requestClass);
+
+            // Fallback to static analysis if execution failed
+            if (empty($properties)) {
+                $properties = $this->getRequestPropertiesByStaticAnalysis($reflection);
+            }
+
+            if (empty($properties)) {
+                return null;
+            }
+
+            // Sort by name
+            usort($properties, fn($a, $b) => strcmp($a['name'], $b['name']));
+
+            $propertiesString = implode("\n", array_map(
+                fn($prop) => "  {$prop['name']}" . ($prop['nullable'] ? '?' : '') . ": {$prop['type']};",
+                $properties
+            ));
+
+            return "export interface {$interfaceName} {\n{$propertiesString}\n}";
+        } catch (\Throwable $e) {
+            return "// Error generating interface for {$requestClass}: {$e->getMessage()}";
+        }
+    }
+
+    /**
+     * Get request properties by executing rules() method.
+     */
+    protected function getRequestPropertiesByExecution(string $requestClass): array
+    {
+        try {
+            // Create a fake request to instantiate the FormRequest
+            $fakeRequest = Request::create('/', 'POST');
+            $formRequest = new $requestClass();
+
+            // Set the request data to avoid issues
+            $formRequest->setContainer(app());
+
+            // Call rules() method
+            if (!method_exists($formRequest, 'rules')) {
+                return [];
+            }
+
+            $rules = $formRequest->rules();
+
+            if (!is_array($rules)) {
+                return [];
+            }
+
+            return $this->parseValidationRules($rules);
+        } catch (\Throwable $e) {
+            return [];
+        }
+    }
+
+    /**
+     * Get request properties by static analysis of rules() method.
+     */
+    protected function getRequestPropertiesByStaticAnalysis(ReflectionClass $reflection): array
+    {
+        try {
+            if (!$reflection->hasMethod('rules')) {
+                return [];
+            }
+
+            $method = $reflection->getMethod('rules');
+            $filename = $method->getFileName();
+            $startLine = $method->getStartLine();
+            $endLine = $method->getEndLine();
+
+            if (!$filename || !$startLine || !$endLine) {
+                return [];
+            }
+
+            $lines = file($filename);
+            $methodBody = implode('', array_slice($lines, $startLine - 1, $endLine - $startLine + 1));
+
+            // Find array keys in patterns like 'key' => or "key" =>
+            preg_match_all("/['\"]([a-zA-Z_][a-zA-Z0-9_.*]*)['\"]\s*=>/", $methodBody, $matches);
+
+            $properties = [];
+            $seenKeys = [];
+
+            foreach ($matches[1] as $key) {
+                // Handle nested rules like 'items.*' or 'items.*.name'
+                $baseKey = explode('.', $key)[0];
+
+                if (isset($seenKeys[$baseKey])) {
+                    continue;
+                }
+                $seenKeys[$baseKey] = true;
+
+                // Try to detect if it's an array field
+                $isArray = str_contains($key, '.*') || str_contains($key, '.*.');
+
+                $properties[] = [
+                    'name' => $baseKey,
+                    'type' => $isArray ? 'any[]' : 'any',
+                    'nullable' => true,
+                ];
+            }
+
+            return $properties;
+        } catch (\Throwable $e) {
+            return [];
+        }
+    }
+
+    /**
+     * Parse Laravel validation rules and convert to TypeScript properties.
+     */
+    protected function parseValidationRules(array $rules): array
+    {
+        $properties = [];
+        $seenKeys = [];
+
+        foreach ($rules as $field => $fieldRules) {
+            // Handle nested rules like 'items.*' or 'items.*.name'
+            $baseField = explode('.', $field)[0];
+
+            if (isset($seenKeys[$baseField])) {
+                continue;
+            }
+            $seenKeys[$baseField] = true;
+
+            // Normalize rules to array
+            if (is_string($fieldRules)) {
+                $fieldRules = explode('|', $fieldRules);
+            }
+
+            // Convert Rule objects to strings where possible
+            $rulesArray = [];
+            foreach ($fieldRules as $rule) {
+                if (is_string($rule)) {
+                    $rulesArray[] = strtolower($rule);
+                } elseif (is_object($rule)) {
+                    $rulesArray[] = strtolower(class_basename($rule));
+                }
+            }
+
+            // Determine if field is required or nullable
+            $isRequired = in_array('required', $rulesArray);
+            $isNullable = in_array('nullable', $rulesArray) || in_array('sometimes', $rulesArray);
+
+            // If not explicitly required, treat as optional
+            $isOptional = !$isRequired || $isNullable;
+
+            // Determine TypeScript type from rules
+            $type = $this->validationRuleToTypeScript($rulesArray, $field);
+
+            $properties[] = [
+                'name' => $baseField,
+                'type' => $type,
+                'nullable' => $isOptional,
+            ];
+        }
+
+        return $properties;
+    }
+
+    /**
+     * Convert Laravel validation rules to TypeScript type.
+     */
+    protected function validationRuleToTypeScript(array $rules, string $field): string
+    {
+        // Check for array type first (items.* pattern or 'array' rule)
+        if (str_contains($field, '.*') || in_array('array', $rules)) {
+            return 'any[]';
+        }
+
+        // Check for specific types
+        foreach ($rules as $rule) {
+            // Handle rules with parameters like 'max:255'
+            $ruleName = explode(':', $rule)[0];
+
+            switch ($ruleName) {
+                case 'integer':
+                case 'numeric':
+                case 'digits':
+                case 'digits_between':
+                    return 'number';
+
+                case 'boolean':
+                case 'bool':
+                case 'accepted':
+                case 'declined':
+                    return 'boolean';
+
+                case 'array':
+                    return 'any[]';
+
+                case 'file':
+                case 'image':
+                case 'mimes':
+                case 'mimetypes':
+                    return 'File';
+
+                case 'date':
+                case 'date_format':
+                case 'before':
+                case 'after':
+                case 'before_or_equal':
+                case 'after_or_equal':
+                    return 'string'; // Dates are usually sent as strings
+
+                case 'json':
+                    return 'Record<string, any>';
+
+                case 'string':
+                case 'email':
+                case 'url':
+                case 'uuid':
+                case 'ip':
+                case 'ipv4':
+                case 'ipv6':
+                case 'mac_address':
+                case 'regex':
+                case 'alpha':
+                case 'alpha_dash':
+                case 'alpha_num':
+                    return 'string';
+            }
+        }
+
+        // Default to string
         return 'string';
     }
 
@@ -936,5 +1246,62 @@ TS;
         }
 
         return $unique;
+    }
+
+    /**
+     * Build unique TypeScript interface names, adding namespace prefix only when there are conflicts.
+     *
+     * @param array $classes Array of fully qualified class names
+     * @param string $baseNamespace The base namespace to strip when building prefixes
+     * @return array Map of class name => unique TypeScript name
+     */
+    protected function buildUniqueNames(array $classes, string $baseNamespace): array
+    {
+        $names = [];
+        $shortNameCount = [];
+
+        // First pass: count occurrences of each short name
+        foreach ($classes as $class) {
+            $shortName = class_basename($class);
+            $shortNameCount[$shortName] = ($shortNameCount[$shortName] ?? 0) + 1;
+        }
+
+        // Second pass: assign unique names
+        foreach ($classes as $class) {
+            $shortName = class_basename($class);
+
+            if ($shortNameCount[$shortName] === 1) {
+                // No conflict, use short name
+                $names[$class] = $shortName;
+            } else {
+                // Conflict detected, add namespace prefix
+                $names[$class] = $this->buildPrefixedName($class, $baseNamespace);
+            }
+        }
+
+        return $names;
+    }
+
+    /**
+     * Build a prefixed name from namespace for conflict resolution.
+     *
+     * Example: App\Http\Requests\Admin\StoreUserRequest -> AdminStoreUserRequest
+     */
+    protected function buildPrefixedName(string $class, string $baseNamespace): string
+    {
+        $shortName = class_basename($class);
+
+        // Remove the base namespace and the class name to get the relative path
+        $relativePath = str_replace($baseNamespace, '', $class);
+        $relativePath = str_replace('\\' . $shortName, '', $relativePath);
+
+        if (empty($relativePath)) {
+            return $shortName;
+        }
+
+        // Convert namespace parts to prefix (Admin\User -> AdminUser)
+        $prefix = str_replace('\\', '', $relativePath);
+
+        return $prefix . $shortName;
     }
 }

@@ -133,4 +133,32 @@ return [
     'exclude_resources' => [
         // App\Http\Resources\SomeResource::class,
     ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Include Form Requests
+    |--------------------------------------------------------------------------
+    |
+    | Whether to generate TypeScript interfaces from Form Requests.
+    | This generates types that match the expected input for API endpoints,
+    | based on validation rules defined in the Form Request classes.
+    |
+    */
+    'include_requests' => env('TYPESCRIPT_MODELS_INCLUDE_REQUESTS', true),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Requests Configuration
+    |--------------------------------------------------------------------------
+    |
+    | Configure which Form Requests to include and how to discover them.
+    |
+    */
+    'requests_paths' => [
+        app_path('Http/Requests'),
+    ],
+
+    'exclude_requests' => [
+        // App\Http\Requests\SomeRequest::class,
+    ],
 ];
