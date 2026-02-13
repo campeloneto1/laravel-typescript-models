@@ -1,6 +1,6 @@
 # Laravel TypeScript Models
 
-Automatically generate TypeScript interfaces from your Laravel Eloquent models, API Resources, and Form Requests via an API endpoint.
+Automatically generate TypeScript interfaces from your Laravel Eloquent models, API Resources, and Form Requests via an API endpoint or CLI command.
 
 ## Features
 
@@ -8,10 +8,14 @@ Automatically generate TypeScript interfaces from your Laravel Eloquent models, 
 - **API Resources**: Generate interfaces from JsonResource classes (supports multiple resources per model)
 - **Form Requests**: Generate interfaces from FormRequest validation rules
 - **Yup Schemas**: Generate Yup validation schemas from Form Requests
+- **Zod Schemas**: Generate Zod validation schemas from Form Requests
+- **Union Literal Types**: Enum-like types from `in:` rules (`'admin' | 'user' | 'guest'`)
 - **Pagination Types**: Auto-generated `PaginatedResponse<T>` generic type
 - **Array Types**: Auto-generated array types (`Users`, `Posts`, etc.)
 - **Smart Detection**: Multiple strategies for type detection (return type, PHPDoc, method body)
 - **Conflict Resolution**: Automatic name prefixing when classes have the same name in different folders
+- **CLI Command**: `php artisan typescript:generate` for CI/CD integration
+- **Web Configurator**: Interactive HTML page to customize and download types
 - **Security**: Token authentication, IP whitelist, disabled by default
 
 ## Installation
@@ -54,11 +58,52 @@ TYPESCRIPT_MODELS_INCLUDE_RELATIONS=true
 TYPESCRIPT_MODELS_INCLUDE_RESOURCES=true
 TYPESCRIPT_MODELS_INCLUDE_REQUESTS=true
 TYPESCRIPT_MODELS_GENERATE_YUP_SCHEMAS=true
+TYPESCRIPT_MODELS_GENERATE_ZOD_SCHEMAS=false
 ```
 
 ## Usage
 
-### Fetching TypeScript Interfaces
+### CLI Command (Recommended)
+
+Generate TypeScript interfaces directly from the command line:
+
+```bash
+# Generate with default options
+php artisan typescript:generate
+
+# Specify output file
+php artisan typescript:generate --output=resources/js/types/api.d.ts
+
+# Generate only specific types
+php artisan typescript:generate --models          # Only models
+php artisan typescript:generate --resources       # Only resources
+php artisan typescript:generate --requests        # Only requests
+
+# Choose validation schema library
+php artisan typescript:generate --yup            # Generate Yup schemas
+php artisan typescript:generate --zod            # Generate Zod schemas
+php artisan typescript:generate --yup --zod      # Generate both
+
+# Exclude pagination/array types
+php artisan typescript:generate --no-paginated --no-array-types
+```
+
+### Web Configurator
+
+Access the interactive configurator page to customize and download your types:
+
+```
+http://localhost/api/typescript-models/configurator?token=your-secret-token
+```
+
+Features:
+- Toggle models, resources, requests
+- Enable/disable relations and accessors
+- Choose between Yup and Zod schemas
+- Preview before download
+- Copy generated URL for CI/CD
+
+### API Endpoint
 
 ```bash
 # Using token in header
@@ -69,6 +114,9 @@ curl -H "Authorization: Bearer your-secret-token" http://localhost/api/typescrip
 
 # Using query parameter
 curl "http://localhost/api/typescript-models?token=your-secret-token"
+
+# With custom options
+curl "http://localhost/api/typescript-models?token=your-token&resources=1&requests=1&yup=1&zod=0"
 ```
 
 ### Integrating with Your Frontend
@@ -452,7 +500,100 @@ function UserForm() {
 
 ---
 
-## 5. Pagination Types
+## 5. Zod Validation Schemas
+
+Generate Zod schemas from your Form Requests. Zod is a TypeScript-first schema validation library.
+
+### Enable Zod Schemas
+
+```env
+TYPESCRIPT_MODELS_GENERATE_ZOD_SCHEMAS=true
+```
+
+### Laravel Form Request
+
+```php
+class StoreUserRequest extends FormRequest
+{
+    public function rules(): array
+    {
+        return [
+            'name' => 'required|string|min:2|max:255',
+            'email' => 'required|email',
+            'role' => 'required|in:admin,user,guest',
+            'age' => 'nullable|integer|min:18',
+        ];
+    }
+}
+```
+
+### Generated Zod Schema
+
+```typescript
+// Zod Validation Schemas
+// Usage: import { z } from 'zod';
+
+export const StoreUserRequestSchema = z.object({
+  name: z.string().min(2, { message: 'Must be at least 2 characters' }).max(255, { message: 'Must be at most 255 characters' }),
+  email: z.string().email({ message: 'Invalid email address' }),
+  role: z.enum(['admin', 'user', 'guest']),
+  age: z.number().min(18, { message: 'Must be at least 18' }).nullable().optional(),
+});
+```
+
+### Using in React
+
+```tsx
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { z } from 'zod';
+import { StoreUserRequestSchema } from '@/types/models';
+
+type StoreUserRequest = z.infer<typeof StoreUserRequestSchema>;
+
+function UserForm() {
+  const { register, handleSubmit, formState: { errors } } = useForm<StoreUserRequest>({
+    resolver: zodResolver(StoreUserRequestSchema)
+  });
+
+  // ...
+}
+```
+
+---
+
+## 6. Enum Union Literal Types
+
+The package automatically generates TypeScript union literal types from `in:` validation rules and `Rule::in()`:
+
+### Laravel Validation
+
+```php
+// Using string rule
+'role' => 'required|in:admin,user,guest',
+
+// Using Rule::in()
+'status' => ['required', Rule::in(['pending', 'approved', 'rejected'])],
+
+// Using Enum rule (Laravel 9+)
+'type' => ['required', Rule::enum(OrderType::class)],
+```
+
+### Generated TypeScript
+
+```typescript
+export interface StoreOrderRequest {
+  role: 'admin' | 'user' | 'guest';
+  status: 'pending' | 'approved' | 'rejected';
+  type: 'delivery' | 'pickup' | 'dine_in';
+}
+```
+
+This provides much stronger typing than generic `string` types!
+
+---
+
+## 7. Pagination Types
 
 Auto-generated generic pagination interfaces:
 

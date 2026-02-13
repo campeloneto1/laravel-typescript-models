@@ -2,6 +2,7 @@
 
 namespace Campelo\LaravelTypescriptModels;
 
+use Campelo\LaravelTypescriptModels\Console\Commands\GenerateTypescriptCommand;
 use Campelo\LaravelTypescriptModels\Http\Controllers\TypeScriptGeneratorController;
 use Campelo\LaravelTypescriptModels\Services\ModelToTypeScriptService;
 use Illuminate\Support\Facades\Route;
@@ -32,6 +33,19 @@ class TypeScriptModelsServiceProvider extends ServiceProvider
         ], 'typescript-models-config');
 
         $this->registerRoutes();
+        $this->registerCommands();
+    }
+
+    /**
+     * Register the package commands.
+     */
+    protected function registerCommands(): void
+    {
+        if ($this->app->runningInConsole()) {
+            $this->commands([
+                GenerateTypescriptCommand::class,
+            ]);
+        }
     }
 
     /**
@@ -39,11 +53,15 @@ class TypeScriptModelsServiceProvider extends ServiceProvider
      */
     protected function registerRoutes(): void
     {
-        Route::middleware(config('typescript-models.middleware', ['api']))
-            ->get(
-                config('typescript-models.route', '/api/typescript-models'),
-                TypeScriptGeneratorController::class
-            )
+        $middleware = config('typescript-models.middleware', ['api']);
+        $route = config('typescript-models.route', '/api/typescript-models');
+
+        Route::middleware($middleware)
+            ->get($route, TypeScriptGeneratorController::class)
             ->name('typescript-models.generate');
+
+        Route::middleware($middleware)
+            ->get($route . '/configurator', [TypeScriptGeneratorController::class, 'configurator'])
+            ->name('typescript-models.configurator');
     }
 }

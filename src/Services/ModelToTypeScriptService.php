@@ -32,6 +32,30 @@ class ModelToTypeScriptService
     protected array $requestNames = [];
 
     /**
+     * Get discovered models after generation.
+     */
+    public function getDiscoveredModels(): array
+    {
+        return $this->discoveredModels;
+    }
+
+    /**
+     * Get discovered resources after generation.
+     */
+    public function getDiscoveredResources(): array
+    {
+        return $this->discoveredResources;
+    }
+
+    /**
+     * Get discovered requests after generation.
+     */
+    public function getDiscoveredRequests(): array
+    {
+        return $this->discoveredRequests;
+    }
+
+    /**
      * Generate TypeScript interfaces for all discovered models and resources.
      */
     public function generate(): string
@@ -105,9 +129,10 @@ class ModelToTypeScriptService
                 . "\n";
         }
 
-        // Generate Form Request interfaces and Yup schemas
+        // Generate Form Request interfaces and validation schemas
         $requestInterfaces = [];
         $yupSchemas = [];
+        $zodSchemas = [];
 
         if (config('typescript-models.include_requests', true)) {
             $this->discoveredRequests = $this->discoverRequests();
@@ -131,6 +156,14 @@ class ModelToTypeScriptService
                         $yupSchemas[] = $schema;
                     }
                 }
+
+                // Generate Zod schema if enabled
+                if (config('typescript-models.generate_zod_schemas', false)) {
+                    $schema = $this->requestToZodSchema($requestClass);
+                    if ($schema) {
+                        $zodSchemas[] = $schema;
+                    }
+                }
             }
         }
 
@@ -146,6 +179,14 @@ class ModelToTypeScriptService
             $output .= "\n// Yup Validation Schemas\n"
                 . "// Usage: import * as yup from 'yup';\n"
                 . implode("\n\n", $yupSchemas)
+                . "\n";
+        }
+
+        // Zod schemas
+        if (!empty($zodSchemas)) {
+            $output .= "\n// Zod Validation Schemas\n"
+                . "// Usage: import { z } from 'zod';\n"
+                . implode("\n\n", $zodSchemas)
                 . "\n";
         }
 
@@ -366,8 +407,8 @@ TS;
             $properties = $this->getModelProperties($model, $reflection);
             $relations = $this->getModelRelations($model, $reflection);
 
-            // Merge properties and relations
-            $allProperties = array_merge($properties, $relations);
+            // Detect and resolve conflicts between properties and relations
+            $allProperties = $this->mergePropertiesWithConflictResolution($properties, $relations);
 
             if (empty($allProperties)) {
                 return null;
@@ -736,7 +777,9 @@ TS;
                 if (is_string($rule)) {
                     $rulesArray[] = strtolower($rule);
                 } elseif (is_object($rule)) {
-                    $rulesArray[] = strtolower(class_basename($rule));
+                    // Try to extract values from Rule::in() objects
+                    $ruleString = $this->extractRuleObjectString($rule);
+                    $rulesArray[] = $ruleString;
                 }
             }
 
@@ -761,6 +804,55 @@ TS;
     }
 
     /**
+     * Extract rule string from Rule objects (e.g., Rule::in()).
+     */
+    protected function extractRuleObjectString(object $rule): string
+    {
+        $className = class_basename($rule);
+
+        // Handle Illuminate\Validation\Rules\In
+        if ($className === 'In') {
+            try {
+                // Use reflection to get the values property
+                $reflection = new ReflectionClass($rule);
+                if ($reflection->hasProperty('values')) {
+                    $prop = $reflection->getProperty('values');
+                    $prop->setAccessible(true);
+                    $values = $prop->getValue($rule);
+
+                    if (is_array($values)) {
+                        return 'in:' . implode(',', $values);
+                    }
+                }
+            } catch (\Throwable) {
+                // Fallback
+            }
+        }
+
+        // Handle Illuminate\Validation\Rules\Enum
+        if ($className === 'Enum') {
+            try {
+                $reflection = new ReflectionClass($rule);
+                if ($reflection->hasProperty('type')) {
+                    $prop = $reflection->getProperty('type');
+                    $prop->setAccessible(true);
+                    $enumClass = $prop->getValue($rule);
+
+                    // Get enum cases
+                    if (enum_exists($enumClass)) {
+                        $cases = array_map(fn($case) => $case->value ?? $case->name, $enumClass::cases());
+                        return 'in:' . implode(',', $cases);
+                    }
+                }
+            } catch (\Throwable) {
+                // Fallback
+            }
+        }
+
+        return strtolower($className);
+    }
+
+    /**
      * Convert Laravel validation rules to TypeScript type.
      */
     protected function validationRuleToTypeScript(array $rules, string $field): string
@@ -773,9 +865,28 @@ TS;
         // Check for specific types
         foreach ($rules as $rule) {
             // Handle rules with parameters like 'max:255'
-            $ruleName = explode(':', $rule)[0];
+            $ruleParts = explode(':', $rule, 2);
+            $ruleName = $ruleParts[0];
+            $ruleParams = $ruleParts[1] ?? '';
 
             switch ($ruleName) {
+                case 'in':
+                case 'in_array':
+                    // Generate union literal type: 'value1' | 'value2' | 'value3'
+                    if ($ruleParams) {
+                        $values = array_map('trim', explode(',', $ruleParams));
+                        $unionTypes = array_map(function ($value) {
+                            // Check if it's a number
+                            if (is_numeric($value)) {
+                                return $value;
+                            }
+                            // It's a string, wrap in quotes
+                            return "'" . addslashes($value) . "'";
+                        }, $values);
+                        return implode(' | ', $unionTypes);
+                    }
+                    return 'string';
+
                 case 'integer':
                 case 'numeric':
                 case 'digits':
@@ -1081,6 +1192,259 @@ TS;
                 case 'mimes':
                 case 'mimetypes':
                     return 'mixed'; // Yup doesn't have a file type
+
+                case 'string':
+                case 'email':
+                case 'url':
+                case 'uuid':
+                case 'ip':
+                case 'regex':
+                case 'alpha':
+                case 'alpha_dash':
+                case 'alpha_num':
+                    return 'string';
+            }
+        }
+
+        // Default to string
+        return 'string';
+    }
+
+    /**
+     * Convert a Form Request class to a Zod validation schema.
+     */
+    protected function requestToZodSchema(string $requestClass): ?string
+    {
+        try {
+            $reflection = new ReflectionClass($requestClass);
+            $schemaName = ($this->requestNames[$requestClass] ?? $reflection->getShortName()) . 'Schema';
+
+            // Try to get rules by instantiating and calling rules()
+            $rules = $this->getRequestRules($requestClass);
+
+            // Fallback to static analysis if execution failed
+            if (empty($rules)) {
+                return null;
+            }
+
+            $fields = $this->validationRulesToZod($rules);
+
+            if (empty($fields)) {
+                return null;
+            }
+
+            $fieldsString = implode(",\n", array_map(
+                fn($field) => "  {$field['name']}: {$field['schema']}",
+                $fields
+            ));
+
+            return "export const {$schemaName} = z.object({\n{$fieldsString},\n});";
+        } catch (\Throwable $e) {
+            return "// Error generating Zod schema for {$requestClass}: {$e->getMessage()}";
+        }
+    }
+
+    /**
+     * Convert Laravel validation rules to Zod schema fields.
+     */
+    protected function validationRulesToZod(array $rules): array
+    {
+        $fields = [];
+        $seenKeys = [];
+
+        foreach ($rules as $field => $fieldRules) {
+            // Handle nested rules like 'items.*' or 'items.*.name'
+            $baseField = explode('.', $field)[0];
+
+            if (isset($seenKeys[$baseField])) {
+                continue;
+            }
+            $seenKeys[$baseField] = true;
+
+            // Normalize rules to array
+            if (is_string($fieldRules)) {
+                $fieldRules = explode('|', $fieldRules);
+            }
+
+            // Convert Rule objects to strings where possible
+            $rulesArray = [];
+            $rulesWithParams = [];
+
+            foreach ($fieldRules as $rule) {
+                if (is_string($rule)) {
+                    $rulesArray[] = strtolower(explode(':', $rule)[0]);
+                    $rulesWithParams[] = strtolower($rule);
+                } elseif (is_object($rule)) {
+                    $ruleString = $this->extractRuleObjectString($rule);
+                    $rulesArray[] = strtolower(explode(':', $ruleString)[0]);
+                    $rulesWithParams[] = strtolower($ruleString);
+                }
+            }
+
+            $schema = $this->buildZodSchema($rulesArray, $rulesWithParams, $field);
+
+            $fields[] = [
+                'name' => $baseField,
+                'schema' => $schema,
+            ];
+        }
+
+        return $fields;
+    }
+
+    /**
+     * Build a Zod schema string from Laravel validation rules.
+     */
+    protected function buildZodSchema(array $rules, array $rulesWithParams, string $field): string
+    {
+        $schema = [];
+
+        // Determine base type
+        $baseType = $this->getZodBaseType($rules, $field);
+        $schema[] = "z.{$baseType}()";
+
+        // Add validations based on rules
+        foreach ($rulesWithParams as $rule) {
+            $parts = explode(':', $rule);
+            $ruleName = $parts[0];
+            $params = isset($parts[1]) ? explode(',', $parts[1]) : [];
+
+            switch ($ruleName) {
+                case 'email':
+                    $schema[] = "email({ message: 'Invalid email address' })";
+                    break;
+
+                case 'url':
+                    $schema[] = "url({ message: 'Invalid URL' })";
+                    break;
+
+                case 'min':
+                    if (!empty($params[0])) {
+                        if (in_array('string', $rules)) {
+                            $schema[] = "min({$params[0]}, { message: 'Must be at least {$params[0]} characters' })";
+                        } else {
+                            $schema[] = "min({$params[0]}, { message: 'Must be at least {$params[0]}' })";
+                        }
+                    }
+                    break;
+
+                case 'max':
+                    if (!empty($params[0])) {
+                        if (in_array('string', $rules)) {
+                            $schema[] = "max({$params[0]}, { message: 'Must be at most {$params[0]} characters' })";
+                        } else {
+                            $schema[] = "max({$params[0]}, { message: 'Must be at most {$params[0]}' })";
+                        }
+                    }
+                    break;
+
+                case 'between':
+                    if (count($params) >= 2) {
+                        $schema[] = "min({$params[0]})";
+                        $schema[] = "max({$params[1]})";
+                    }
+                    break;
+
+                case 'size':
+                    if (!empty($params[0])) {
+                        if (in_array('string', $rules)) {
+                            $schema[] = "length({$params[0]}, { message: 'Must be exactly {$params[0]} characters' })";
+                        }
+                    }
+                    break;
+
+                case 'regex':
+                    if (!empty($params[0])) {
+                        // Remove delimiters from regex
+                        $pattern = trim($params[0], '/');
+                        $schema[] = "regex(/{$pattern}/, { message: 'Invalid format' })";
+                    }
+                    break;
+
+                case 'in':
+                    if (!empty($params)) {
+                        // Check if all params are numeric
+                        $allNumeric = array_reduce($params, fn($carry, $p) => $carry && is_numeric($p), true);
+                        if ($allNumeric) {
+                            $values = implode(', ', $params);
+                            // Replace base type with enum for literals
+                            $schema[0] = "z.union([" . implode(', ', array_map(fn($p) => "z.literal({$p})", $params)) . "])";
+                        } else {
+                            $schema[0] = "z.enum(['" . implode("', '", $params) . "'])";
+                        }
+                    }
+                    break;
+
+                case 'uuid':
+                    $schema[] = "uuid({ message: 'Invalid UUID' })";
+                    break;
+
+                case 'integer':
+                    $schema[] = "int({ message: 'Must be an integer' })";
+                    break;
+
+                case 'positive':
+                    $schema[] = "positive({ message: 'Must be positive' })";
+                    break;
+
+                case 'negative':
+                    $schema[] = "negative({ message: 'Must be negative' })";
+                    break;
+            }
+        }
+
+        // Handle nullable and optional
+        $isRequired = in_array('required', $rules);
+        $isNullable = in_array('nullable', $rules);
+
+        if ($isNullable) {
+            $schema[] = "nullable()";
+        }
+
+        if (!$isRequired) {
+            $schema[] = "optional()";
+        }
+
+        return implode('.', $schema);
+    }
+
+    /**
+     * Determine the base Zod type from Laravel rules.
+     */
+    protected function getZodBaseType(array $rules, string $field): string
+    {
+        // Check for array type first
+        if (str_contains($field, '.*') || in_array('array', $rules)) {
+            return 'array(z.any())';
+        }
+
+        // Check for specific types
+        foreach ($rules as $rule) {
+            switch ($rule) {
+                case 'integer':
+                case 'numeric':
+                case 'digits':
+                case 'digits_between':
+                    return 'number';
+
+                case 'boolean':
+                case 'bool':
+                case 'accepted':
+                case 'declined':
+                    return 'boolean';
+
+                case 'array':
+                    return 'array(z.any())';
+
+                case 'date':
+                case 'date_format':
+                    return 'coerce.date';
+
+                case 'file':
+                case 'image':
+                case 'mimes':
+                case 'mimetypes':
+                    return 'instanceof(File)';
 
                 case 'string':
                 case 'email':
@@ -1534,6 +1898,39 @@ TS;
         }
 
         return $unique;
+    }
+
+    /**
+     * Merge properties and relations with conflict resolution.
+     *
+     * When a property (column) has the same name as a relation, this method:
+     * - Renames numeric properties to {name}_count (e.g., clicks -> clicks_count)
+     * - Keeps the relation with the original name
+     */
+    protected function mergePropertiesWithConflictResolution(array $properties, array $relations): array
+    {
+        $relationNames = array_column($relations, 'name');
+        $resolvedProperties = [];
+
+        foreach ($properties as $prop) {
+            $name = $prop['name'];
+
+            // Check if there's a conflict with a relation
+            if (in_array($name, $relationNames)) {
+                // If the property is numeric, rename to {name}_count
+                if (in_array($prop['type'], ['number', 'int', 'integer', 'float', 'double'])) {
+                    $prop['name'] = $name . '_count';
+                    $resolvedProperties[] = $prop;
+                }
+                // If not numeric, skip the property and keep only the relation
+                // This handles cases where the column and relation serve the same purpose
+                continue;
+            }
+
+            $resolvedProperties[] = $prop;
+        }
+
+        return array_merge($resolvedProperties, $relations);
     }
 
     /**

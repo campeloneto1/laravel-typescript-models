@@ -173,4 +173,16 @@ return [
     |
     */
     'generate_yup_schemas' => env('TYPESCRIPT_MODELS_GENERATE_YUP_SCHEMAS', true),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Generate Zod Schemas
+    |--------------------------------------------------------------------------
+    |
+    | Whether to generate Zod validation schemas from Form Requests.
+    | Zod is a TypeScript-first schema validation library.
+    | Requires 'include_requests' to be enabled.
+    |
+    */
+    'generate_zod_schemas' => env('TYPESCRIPT_MODELS_GENERATE_ZOD_SCHEMAS', false),
 ];
