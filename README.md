@@ -4,11 +4,13 @@ Automatically generate TypeScript interfaces from your Laravel Eloquent models, 
 
 ## Features
 
-- **Models**: Generate TypeScript interfaces from Eloquent models
-- **API Resources**: Generate interfaces from JsonResource classes (supports multiple resources per model)
+- **API Resources (Recommended)**: Generate interfaces from JsonResource classes as source of truth
+- **Models**: Generate TypeScript interfaces from Eloquent models (opt-in)
 - **Form Requests**: Generate interfaces from FormRequest validation rules
 - **Yup Schemas**: Generate Yup validation schemas from Form Requests
 - **Zod Schemas**: Generate Zod validation schemas from Form Requests
+- **Intelligent Type Inference**: Eliminate `any` types using PHPDoc, static analysis, and Model casts
+- **Split by Domain**: Generate separate files per module (`users.ts`, `orders.ts`)
 - **Union Literal Types**: Enum-like types from `in:` rules (`'admin' | 'user' | 'guest'`)
 - **Pagination Types**: Auto-generated `PaginatedResponse<T>` generic type
 - **Array Types**: Auto-generated array types (`Users`, `Posts`, etc.)
@@ -53,12 +55,21 @@ TYPESCRIPT_MODELS_ALLOWED_IPS=127.0.0.1,::1
 TYPESCRIPT_MODELS_PROPERTIES_MODE=fillable
 
 # Optional: Include/exclude features
+TYPESCRIPT_MODELS_INCLUDE_MODELS=false           # Models disabled by default (use Resources!)
 TYPESCRIPT_MODELS_INCLUDE_ACCESSORS=false
 TYPESCRIPT_MODELS_INCLUDE_RELATIONS=true
 TYPESCRIPT_MODELS_INCLUDE_RESOURCES=true
 TYPESCRIPT_MODELS_INCLUDE_REQUESTS=true
 TYPESCRIPT_MODELS_GENERATE_YUP_SCHEMAS=true
 TYPESCRIPT_MODELS_GENERATE_ZOD_SCHEMAS=false
+
+# Type inference for Resources (eliminates 'any' types)
+TYPESCRIPT_MODELS_INFER_TYPES=true
+TYPESCRIPT_MODELS_UNKNOWN_FALLBACK=unknown       # 'unknown' | 'any' | 'never'
+
+# Split output by domain
+TYPESCRIPT_MODELS_SPLIT_BY_DOMAIN=false          # 'subdirectory' | 'class' | false
+TYPESCRIPT_MODELS_DOMAIN_DETECTION=subdirectory
 ```
 
 ## Usage
@@ -68,13 +79,18 @@ TYPESCRIPT_MODELS_GENERATE_ZOD_SCHEMAS=false
 Generate TypeScript interfaces directly from the command line:
 
 ```bash
-# Generate with default options
+# Generate with default options (Resources + Requests, no Models)
 php artisan typescript:generate
 
 # Specify output file
 php artisan typescript:generate --output=resources/js/types/api.d.ts
 
-# Generate only specific types
+# Control what to generate with --only and --include
+php artisan typescript:generate --only=resources              # Only resources
+php artisan typescript:generate --only=resources,requests     # Resources + Requests
+php artisan typescript:generate --include=models              # Add models to default
+
+# Legacy flags (still supported)
 php artisan typescript:generate --models          # Only models
 php artisan typescript:generate --resources       # Only resources
 php artisan typescript:generate --requests        # Only requests
@@ -83,6 +99,10 @@ php artisan typescript:generate --requests        # Only requests
 php artisan typescript:generate --yup            # Generate Yup schemas
 php artisan typescript:generate --zod            # Generate Zod schemas
 php artisan typescript:generate --yup --zod      # Generate both
+
+# Split by domain (generates multiple files)
+php artisan typescript:generate --split-by=subdirectory --output=resources/types/
+# Creates: users.ts, orders.ts, _shared.ts, index.ts
 
 # Exclude pagination/array types
 php artisan typescript:generate --no-paginated --no-array-types
@@ -129,6 +149,94 @@ curl "http://localhost/api/typescript-models?token=your-token&resources=1&reques
   }
 }
 ```
+
+---
+
+## Resources vs Models: Best Practices
+
+**Resources are the recommended source of truth** for frontend types because:
+- They represent the actual API response shape
+- They hide internal fields that shouldn't be exposed
+- Multiple Resources can exist for the same Model (summary, detail, admin)
+
+By default, **Models are disabled** (`include_models=false`). Enable them only if needed:
+
+```bash
+# Default: Only Resources + Requests
+php artisan typescript:generate
+
+# Include Models for admin panels or internal tools
+php artisan typescript:generate --include=models
+
+# Or via config
+TYPESCRIPT_MODELS_INCLUDE_MODELS=true
+```
+
+---
+
+## Split by Domain
+
+For large codebases, split generated types into separate files:
+
+```bash
+php artisan typescript:generate --split-by=subdirectory --output=resources/types/
+```
+
+### Directory Structure
+
+Given this Resource structure:
+```
+app/Http/Resources/
+├── Users/
+│   ├── UserResource.php
+│   └── UserSummaryResource.php
+├── Orders/
+│   └── OrderResource.php
+└── ProductResource.php  (no subdirectory)
+```
+
+Generates:
+```
+resources/types/
+├── _shared.ts     # PaginatedResponse, PaginationLink
+├── index.ts       # Re-exports everything
+├── users.ts       # UserResource, UserSummaryResource
+├── orders.ts      # OrderResource
+└── default.ts     # ProductResource (no subdirectory)
+```
+
+### Generated Files
+
+**_shared.ts**
+```typescript
+export interface PaginatedResponse<T> { ... }
+export interface PaginationLink { ... }
+```
+
+**users.ts**
+```typescript
+import type { PaginatedResponse } from './_shared';
+
+export interface UserResource { ... }
+export interface UserSummaryResource { ... }
+export type UserResources = UserResource[];
+export type UserResourcesPaginated = PaginatedResponse<UserResource>;
+```
+
+**index.ts**
+```typescript
+export * from './_shared';
+export * from './users';
+export * from './orders';
+export * from './default';
+```
+
+### Detection Modes
+
+| Mode | Description | Example |
+|------|-------------|---------|
+| `subdirectory` | Uses namespace subdirectory | `Resources\Users\` → `users.ts` |
+| `class` | Groups by class name prefix | `UserResource` → `user.ts` |
 
 ---
 
@@ -282,29 +390,29 @@ class UserProfileResource extends JsonResource
 }
 ```
 
-### Generated TypeScript
+### Generated TypeScript (with Intelligent Type Inference)
 
 ```typescript
-// Resource Interfaces
+// Resource Interfaces - No more 'any' types!
 export interface UserResource {
-  avatar_url?: any;
-  email?: any;
-  full_name?: any;
-  id?: any;
-  member_since?: any;
+  avatar_url?: string;        // Inferred from name pattern (*_url)
+  email?: string;             // Inferred from name pattern
+  full_name?: string;         // Inferred from name pattern
+  id?: number;                // Inferred from name pattern
+  member_since?: string;      // Inferred from ->format() call
 }
 
 export interface UserSummaryResource {
-  id?: any;
-  name?: any;
+  id?: number;
+  name?: string;
 }
 
 export interface UserProfileResource {
-  bio?: any;
-  email?: any;
-  full_name?: any;
-  id?: any;
-  posts_count?: any;
+  bio?: string;
+  email?: string;
+  full_name?: string;
+  id?: number;
+  posts_count?: number;       // Inferred from name pattern (*_count)
 }
 
 // Resource Array Types
@@ -318,10 +426,51 @@ export type UserSummaryResourcesPaginated = PaginatedResponse<UserSummaryResourc
 export type UserProfileResourcesPaginated = PaginatedResponse<UserProfileResource>;
 ```
 
-### How It Works
+### PHPDoc Type Hints (Recommended)
 
-1. **Primary**: Instantiates the Resource with a fake Model and calls `toArray()` to extract keys
-2. **Fallback**: If execution fails, performs static analysis on the `toArray()` method code
+For full control over types, use PHPDoc annotations:
+
+```php
+/**
+ * @property int $id
+ * @property string $full_name
+ * @property string $email
+ * @property string $avatar_url
+ * @property PostResource[] $posts
+ */
+class UserResource extends JsonResource
+{
+    public function toArray($request)
+    {
+        return [
+            'id' => $this->id,
+            'full_name' => $this->name,
+            'email' => $this->email,
+            'avatar_url' => $this->getAvatarUrl(),
+            'posts' => PostResource::collection($this->posts),
+        ];
+    }
+}
+```
+
+### How Type Inference Works
+
+The package uses **multiple strategies** to determine types (in priority order):
+
+1. **PHPDoc `@property`**: Highest priority, most reliable
+2. **Static Analysis**: Detects patterns in `toArray()`:
+   - `PostResource::collection(...)` → `PostResource[]`
+   - `new UserResource(...)` → `UserResource`
+   - `(bool) $value` → `boolean`
+   - `->format('Y-m-d')` → `string`
+3. **Model Casts**: Inherits types from the underlying Model
+4. **Name Patterns**:
+   - `*_id`, `id` → `number`
+   - `*_at`, `*_date` → `string`
+   - `is_*`, `has_*`, `can_*` → `boolean`
+   - `*_count` → `number`
+   - `*_url`, `email`, `name` → `string`
+5. **Fallback**: `unknown` (configurable via `unknown_type_fallback`)
 
 ---
 
@@ -639,6 +788,8 @@ console.log(response.current_page); // number
 ### Models
 
 ```php
+'include_models' => false, // Disabled by default (use Resources!)
+
 'models_paths' => [
     app_path('Models'),
 ],
@@ -666,6 +817,12 @@ console.log(response.current_page); // number
 'exclude_resources' => [
     // App\Http\Resources\SomeResource::class,
 ],
+
+// Type inference to eliminate 'any' types
+'infer_resource_types' => true,
+
+// What to use when type cannot be inferred
+'unknown_type_fallback' => 'unknown', // 'unknown' | 'any' | 'never'
 ```
 
 ### Form Requests
@@ -682,6 +839,17 @@ console.log(response.current_page); // number
 ],
 
 'generate_yup_schemas' => true,
+'generate_zod_schemas' => false,
+```
+
+### Split by Domain
+
+```php
+// Split output into multiple files
+'split_by_domain' => false, // 'subdirectory' | 'class' | false
+
+// How to detect domain from class namespace
+'domain_detection' => 'subdirectory', // 'subdirectory' | 'class_basename'
 ```
 
 ---
@@ -708,38 +876,17 @@ export interface PaginatedResponse<T> {
   // ... other pagination fields
 }
 
-// Model Interfaces
-export interface User {
-  id: number;
-  name?: string;
-  email?: string;
-  posts?: Post[];
-}
-
-export interface Post {
-  id: number;
-  title?: string;
-  user?: User;
-}
-
-// Model Array Types
-export type Users = User[];
-export type Posts = Post[];
-
-// Model Paginated Types
-export type UsersPaginated = PaginatedResponse<User>;
-export type PostsPaginated = PaginatedResponse<Post>;
-
-// Resource Interfaces
+// Resource Interfaces (with intelligent type inference - no 'any'!)
 export interface UserResource {
-  id?: any;
-  full_name?: any;
-  avatar_url?: any;
+  id?: number;
+  full_name?: string;
+  avatar_url?: string;
+  posts?: PostResource[];
 }
 
 export interface UserSummaryResource {
-  id?: any;
-  name?: any;
+  id?: number;
+  name?: string;
 }
 
 // Resource Array Types

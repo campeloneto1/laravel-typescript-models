@@ -60,6 +60,7 @@ class ModelToTypeScriptService
      */
     public function generate(): string
     {
+        // Always discover models for relation resolution, even if not generating them
         $this->discoveredModels = $this->discoverModels();
 
         // Map class names to short names for relation type resolution
@@ -71,12 +72,15 @@ class ModelToTypeScriptService
         $modelTypes = [];
         $modelPaginatedTypes = [];
 
-        foreach ($this->discoveredModels as $modelClass) {
-            $result = $this->modelToInterface($modelClass);
-            if ($result) {
-                $modelInterfaces[] = $result['interface'];
-                $modelTypes[] = $result['type'];
-                $modelPaginatedTypes[] = $result['paginated'];
+        // Only generate model interfaces if enabled
+        if (config('typescript-models.include_models', false)) {
+            foreach ($this->discoveredModels as $modelClass) {
+                $result = $this->modelToInterface($modelClass);
+                if ($result) {
+                    $modelInterfaces[] = $result['interface'];
+                    $modelTypes[] = $result['type'];
+                    $modelPaginatedTypes[] = $result['paginated'];
+                }
             }
         }
 
@@ -191,6 +195,254 @@ class ModelToTypeScriptService
         }
 
         return $output;
+    }
+
+    /**
+     * Generate TypeScript interfaces split by domain/module.
+     *
+     * @param string $mode Detection mode: 'subdirectory' or 'class'
+     * @return array<string, string> Map of filename => content
+     */
+    public function generateSplitByDomain(string $mode = 'subdirectory'): array
+    {
+        // Discover all classes first
+        $this->discoveredModels = $this->discoverModels();
+        foreach ($this->discoveredModels as $modelClass) {
+            $this->modelNames[$modelClass] = class_basename($modelClass);
+        }
+
+        if (config('typescript-models.include_resources', true)) {
+            $this->discoveredResources = $this->discoverResources();
+            foreach ($this->discoveredResources as $resourceClass) {
+                $this->resourceNames[$resourceClass] = class_basename($resourceClass);
+            }
+        }
+
+        if (config('typescript-models.include_requests', true)) {
+            $this->discoveredRequests = $this->discoverRequests();
+            $this->requestNames = $this->buildUniqueNames(
+                $this->discoveredRequests,
+                'App\\Http\\Requests\\'
+            );
+        }
+
+        // Group classes by domain
+        $domainContent = [];
+        $allDomains = [];
+
+        // Process models
+        if (config('typescript-models.include_models', false)) {
+            foreach ($this->discoveredModels as $modelClass) {
+                $domain = $this->extractDomain($modelClass, $mode, 'models');
+                $allDomains[$domain] = true;
+
+                if (!isset($domainContent[$domain])) {
+                    $domainContent[$domain] = [
+                        'interfaces' => [],
+                        'types' => [],
+                        'paginated' => [],
+                        'schemas' => [],
+                        'dependencies' => [],
+                    ];
+                }
+
+                $result = $this->modelToInterface($modelClass);
+                if ($result) {
+                    $domainContent[$domain]['interfaces'][] = $result['interface'];
+                    $domainContent[$domain]['types'][] = $result['type'];
+                    $domainContent[$domain]['paginated'][] = $result['paginated'];
+                }
+            }
+        }
+
+        // Process resources
+        if (config('typescript-models.include_resources', true)) {
+            foreach ($this->discoveredResources as $resourceClass) {
+                $domain = $this->extractDomain($resourceClass, $mode, 'resources');
+                $allDomains[$domain] = true;
+
+                if (!isset($domainContent[$domain])) {
+                    $domainContent[$domain] = [
+                        'interfaces' => [],
+                        'types' => [],
+                        'paginated' => [],
+                        'schemas' => [],
+                        'dependencies' => [],
+                    ];
+                }
+
+                $result = $this->resourceToInterface($resourceClass);
+                if ($result) {
+                    $domainContent[$domain]['interfaces'][] = $result['interface'];
+                    $domainContent[$domain]['types'][] = $result['type'];
+                    $domainContent[$domain]['paginated'][] = $result['paginated'];
+                }
+            }
+        }
+
+        // Process requests
+        if (config('typescript-models.include_requests', true)) {
+            foreach ($this->discoveredRequests as $requestClass) {
+                $domain = $this->extractDomain($requestClass, $mode, 'requests');
+                $allDomains[$domain] = true;
+
+                if (!isset($domainContent[$domain])) {
+                    $domainContent[$domain] = [
+                        'interfaces' => [],
+                        'types' => [],
+                        'paginated' => [],
+                        'schemas' => [],
+                        'dependencies' => [],
+                    ];
+                }
+
+                $result = $this->requestToInterface($requestClass);
+                if ($result) {
+                    $domainContent[$domain]['interfaces'][] = $result;
+                }
+
+                if (config('typescript-models.generate_yup_schemas', true)) {
+                    $schema = $this->requestToYupSchema($requestClass);
+                    if ($schema) {
+                        $domainContent[$domain]['schemas'][] = $schema;
+                    }
+                }
+
+                if (config('typescript-models.generate_zod_schemas', false)) {
+                    $schema = $this->requestToZodSchema($requestClass);
+                    if ($schema) {
+                        $domainContent[$domain]['schemas'][] = $schema;
+                    }
+                }
+            }
+        }
+
+        // Generate files
+        $files = [];
+        $timestamp = now()->toIso8601String();
+
+        // Generate _shared.ts with pagination interfaces
+        $files['_shared.ts'] = <<<TS
+// =============================================================================
+// Shared TypeScript interfaces
+// Generated at: {$timestamp}
+// Do not edit this file manually - it will be overwritten
+// =============================================================================
+
+{$this->generatePaginationInterfaces()}
+TS;
+
+        // Generate domain files
+        foreach ($domainContent as $domain => $content) {
+            $fileContent = <<<TS
+// =============================================================================
+// TypeScript interfaces for: {$domain}
+// Generated at: {$timestamp}
+// Do not edit this file manually - it will be overwritten
+// =============================================================================
+
+import type { PaginatedResponse } from './_shared';
+
+TS;
+
+            if (!empty($content['interfaces'])) {
+                $fileContent .= implode("\n\n", $content['interfaces']) . "\n";
+            }
+
+            if (!empty($content['types'])) {
+                $fileContent .= "\n// Array Types\n" . implode("\n", $content['types']) . "\n";
+            }
+
+            if (!empty($content['paginated'])) {
+                $fileContent .= "\n// Paginated Types\n" . implode("\n", $content['paginated']) . "\n";
+            }
+
+            if (!empty($content['schemas'])) {
+                $hasYup = config('typescript-models.generate_yup_schemas', true);
+                $hasZod = config('typescript-models.generate_zod_schemas', false);
+
+                $fileContent .= "\n// Validation Schemas\n";
+                if ($hasYup) {
+                    $fileContent .= "// Usage: import * as yup from 'yup';\n";
+                }
+                if ($hasZod) {
+                    $fileContent .= "// Usage: import { z } from 'zod';\n";
+                }
+                $fileContent .= implode("\n\n", $content['schemas']) . "\n";
+            }
+
+            $files["{$domain}.ts"] = $fileContent;
+        }
+
+        // Generate index.ts with re-exports
+        $exports = ["export * from './_shared';"];
+        foreach (array_keys($domainContent) as $domain) {
+            $exports[] = "export * from './{$domain}';";
+        }
+        sort($exports);
+
+        $files['index.ts'] = <<<TS
+// =============================================================================
+// TypeScript interfaces index
+// Generated at: {$timestamp}
+// Do not edit this file manually - it will be overwritten
+// =============================================================================
+
+{$this->joinLines($exports)}
+TS;
+
+        return $files;
+    }
+
+    /**
+     * Extract the domain name from a fully qualified class name.
+     */
+    protected function extractDomain(string $class, string $mode, string $type): string
+    {
+        $parts = explode('\\', $class);
+
+        if ($mode === 'subdirectory') {
+            // Find first segment after base namespace
+            $baseCounts = [
+                'models' => 2,     // App\Models\...
+                'resources' => 3, // App\Http\Resources\...
+                'requests' => 3,  // App\Http\Requests\...
+            ];
+
+            $baseCount = $baseCounts[$type] ?? 2;
+
+            // If there's a subdirectory, use it; otherwise use 'default'
+            if (count($parts) > $baseCount + 1) {
+                return Str::snake($parts[$baseCount]);
+            }
+
+            return 'default';
+        }
+
+        if ($mode === 'class') {
+            // Group by class name prefix (e.g., UserResource -> user)
+            $className = class_basename($class);
+
+            // Remove common suffixes
+            $className = preg_replace('/(Resource|Request|Model)$/', '', $className);
+
+            // Extract the main entity name (first word in PascalCase)
+            if (preg_match('/^([A-Z][a-z]+)/', $className, $matches)) {
+                return Str::snake($matches[1]);
+            }
+
+            return Str::snake($className);
+        }
+
+        return 'default';
+    }
+
+    /**
+     * Helper to join lines with newlines.
+     */
+    protected function joinLines(array $lines): string
+    {
+        return implode("\n", $lines);
     }
 
     /**
@@ -458,6 +710,11 @@ TS;
                 return null;
             }
 
+            // Apply intelligent type inference if enabled
+            if (config('typescript-models.infer_resource_types', true)) {
+                $properties = $this->enhanceResourcePropertyTypes($resourceClass, $reflection, $properties);
+            }
+
             // Sort by name
             usort($properties, fn($a, $b) => strcmp($a['name'], $b['name']));
 
@@ -478,6 +735,404 @@ TS;
                 'paginated' => '',
             ];
         }
+    }
+
+    /**
+     * Enhance resource property types using multiple inference strategies.
+     */
+    protected function enhanceResourcePropertyTypes(string $resourceClass, ReflectionClass $reflection, array $properties): array
+    {
+        // Strategy 1: Parse PHPDoc @property annotations
+        $docTypes = $this->parseResourceDocBlock($reflection);
+
+        // Strategy 2: Enhanced static analysis of toArray() method
+        $staticTypes = $this->analyzeToArrayMethodForTypes($reflection);
+
+        // Strategy 3: Infer from underlying Model
+        $modelTypes = $this->inferTypesFromUnderlyingModel($resourceClass);
+
+        // Apply type overrides (priority: PHPDoc > Static > Model > NamePattern > Fallback)
+        $fallbackType = config('typescript-models.unknown_type_fallback', 'unknown');
+
+        foreach ($properties as &$prop) {
+            $name = $prop['name'];
+            $currentType = $prop['type'];
+
+            // Skip if already has a good type
+            if ($currentType !== 'any' && $currentType !== 'unknown') {
+                continue;
+            }
+
+            // Try PHPDoc first (highest priority)
+            if (isset($docTypes[$name])) {
+                $prop['type'] = $docTypes[$name];
+                continue;
+            }
+
+            // Try static analysis
+            if (isset($staticTypes[$name])) {
+                $prop['type'] = $staticTypes[$name];
+                continue;
+            }
+
+            // Try model types
+            if (isset($modelTypes[$name])) {
+                $prop['type'] = $modelTypes[$name];
+                continue;
+            }
+
+            // Try name-based inference
+            $inferredType = $this->inferTypeFromPropertyName($name);
+            if ($inferredType !== null) {
+                $prop['type'] = $inferredType;
+                continue;
+            }
+
+            // Use fallback type
+            $prop['type'] = $fallbackType;
+        }
+
+        return $properties;
+    }
+
+    /**
+     * Parse PHPDoc @property and @property-read annotations from a Resource class.
+     */
+    protected function parseResourceDocBlock(ReflectionClass $reflection): array
+    {
+        $types = [];
+        $docComment = $reflection->getDocComment();
+
+        if (!$docComment) {
+            return $types;
+        }
+
+        // Match @property and @property-read annotations
+        // Pattern: @property(-read)? Type $name
+        preg_match_all(
+            '/@property(?:-read)?\s+([^\s]+)\s+\$([a-zA-Z_][a-zA-Z0-9_]*)/',
+            $docComment,
+            $matches,
+            PREG_SET_ORDER
+        );
+
+        foreach ($matches as $match) {
+            $phpType = $match[1];
+            $name = $match[2];
+            $types[$name] = $this->phpTypeToTypeScript($phpType);
+        }
+
+        return $types;
+    }
+
+    /**
+     * Enhanced static analysis of toArray() method to detect types from code patterns.
+     */
+    protected function analyzeToArrayMethodForTypes(ReflectionClass $reflection): array
+    {
+        $types = [];
+
+        if (!$reflection->hasMethod('toArray')) {
+            return $types;
+        }
+
+        try {
+            $method = $reflection->getMethod('toArray');
+            $filename = $method->getFileName();
+            $startLine = $method->getStartLine();
+            $endLine = $method->getEndLine();
+
+            if (!$filename || !$startLine || !$endLine) {
+                return $types;
+            }
+
+            $lines = file($filename);
+            $methodBody = implode('', array_slice($lines, $startLine - 1, $endLine - $startLine + 1));
+
+            // Pattern 1: Detect Resource::collection() - returns array of Resources
+            // 'posts' => PostResource::collection($this->posts)
+            preg_match_all(
+                "/['\"]([a-zA-Z_][a-zA-Z0-9_]*)['\"]\s*=>\s*([A-Z][a-zA-Z0-9_]*)::collection\s*\(/",
+                $methodBody,
+                $collectionMatches,
+                PREG_SET_ORDER
+            );
+
+            foreach ($collectionMatches as $match) {
+                $propName = $match[1];
+                $resourceName = $match[2];
+                $types[$propName] = "{$resourceName}[]";
+            }
+
+            // Pattern 2: Detect new Resource() - returns single Resource
+            // 'user' => new UserResource($this->user)
+            preg_match_all(
+                "/['\"]([a-zA-Z_][a-zA-Z0-9_]*)['\"]\s*=>\s*new\s+([A-Z][a-zA-Z0-9_]*Resource)\s*\(/",
+                $methodBody,
+                $newResourceMatches,
+                PREG_SET_ORDER
+            );
+
+            foreach ($newResourceMatches as $match) {
+                $propName = $match[1];
+                $resourceName = $match[2];
+                $types[$propName] = $resourceName;
+            }
+
+            // Pattern 3: Detect type casts - (bool), (int), (float), (string), (array)
+            // 'is_active' => (bool) $this->active
+            preg_match_all(
+                "/['\"]([a-zA-Z_][a-zA-Z0-9_]*)['\"]\s*=>\s*\((bool|int|integer|float|double|string|array)\)\s*/",
+                $methodBody,
+                $castMatches,
+                PREG_SET_ORDER
+            );
+
+            foreach ($castMatches as $match) {
+                $propName = $match[1];
+                $cast = strtolower($match[2]);
+                $types[$propName] = $this->phpCastToTypeScript($cast);
+            }
+
+            // Pattern 4: Detect ->format() calls (typically dates returning strings)
+            // 'created_at' => $this->created_at->format('Y-m-d')
+            preg_match_all(
+                "/['\"]([a-zA-Z_][a-zA-Z0-9_]*)['\"]\s*=>\s*\\\$this->[a-zA-Z_]+->format\s*\(/",
+                $methodBody,
+                $formatMatches,
+                PREG_SET_ORDER
+            );
+
+            foreach ($formatMatches as $match) {
+                $propName = $match[1];
+                $types[$propName] = 'string';
+            }
+
+            // Pattern 5: Detect literal values
+            // 'type' => 'user' or 'count' => 0 or 'active' => true
+            preg_match_all(
+                "/['\"]([a-zA-Z_][a-zA-Z0-9_]*)['\"]\s*=>\s*('[^']*'|\"[^\"]*\"|true|false|\d+(?:\.\d+)?)\s*[,\n\]]/",
+                $methodBody,
+                $literalMatches,
+                PREG_SET_ORDER
+            );
+
+            foreach ($literalMatches as $match) {
+                $propName = $match[1];
+                $literal = $match[2];
+
+                if ($literal === 'true' || $literal === 'false') {
+                    $types[$propName] = 'boolean';
+                } elseif (is_numeric(trim($literal, '\'"'))) {
+                    $types[$propName] = 'number';
+                } elseif (preg_match('/^[\'"].*[\'"]$/', $literal)) {
+                    $types[$propName] = 'string';
+                }
+            }
+
+            // Pattern 6: Detect when() and whenLoaded() with Resources
+            // 'profile' => $this->when($condition, new ProfileResource($this->profile))
+            preg_match_all(
+                "/['\"]([a-zA-Z_][a-zA-Z0-9_]*)['\"]\s*=>\s*\\\$this->(?:when|whenLoaded)\s*\([^,]+,\s*(?:fn\s*\(\)\s*=>\s*)?new\s+([A-Z][a-zA-Z0-9_]*Resource)/",
+                $methodBody,
+                $whenMatches,
+                PREG_SET_ORDER
+            );
+
+            foreach ($whenMatches as $match) {
+                $propName = $match[1];
+                $resourceName = $match[2];
+                $types[$propName] = $resourceName;
+            }
+
+        } catch (\Throwable $e) {
+            // Silently fail on analysis errors
+        }
+
+        return $types;
+    }
+
+    /**
+     * Infer types from the underlying Model's casts and properties.
+     */
+    protected function inferTypesFromUnderlyingModel(string $resourceClass): array
+    {
+        $types = [];
+
+        // Try to determine the Model class from Resource name
+        // UserResource -> User, PostSummaryResource -> Post
+        $resourceName = class_basename($resourceClass);
+        $modelName = preg_replace('/(Summary|Detail|Full|Basic|Simple)?Resource$/', '', $resourceName);
+
+        // Try common model namespaces
+        $possibleModelClasses = [
+            "App\\Models\\{$modelName}",
+            "App\\{$modelName}",
+        ];
+
+        $modelClass = null;
+        foreach ($possibleModelClasses as $possibleClass) {
+            if (class_exists($possibleClass) && is_subclass_of($possibleClass, Model::class)) {
+                $modelClass = $possibleClass;
+                break;
+            }
+        }
+
+        if (!$modelClass) {
+            return $types;
+        }
+
+        try {
+            $model = new $modelClass();
+
+            // Get casts from model
+            $casts = $model->getCasts();
+            foreach ($casts as $property => $cast) {
+                $types[$property] = $this->castToTypeScript($cast);
+            }
+
+            // Get common ID fields
+            $types['id'] = 'number';
+            if (method_exists($model, 'getKeyType') && $model->getKeyType() === 'string') {
+                $types['id'] = 'string';
+            }
+
+        } catch (\Throwable $e) {
+            // Silently fail
+        }
+
+        return $types;
+    }
+
+    /**
+     * Infer TypeScript type from a property name pattern.
+     */
+    protected function inferTypeFromPropertyName(string $name): ?string
+    {
+        // ID fields
+        if ($name === 'id' || Str::endsWith($name, '_id')) {
+            return 'number';
+        }
+
+        // Timestamp/date fields
+        if (Str::endsWith($name, ['_at', '_date', '_time', '_on'])) {
+            return 'string';
+        }
+
+        // Count fields
+        if (Str::endsWith($name, '_count') || Str::startsWith($name, 'count_')) {
+            return 'number';
+        }
+
+        // Boolean fields
+        if (Str::startsWith($name, ['is_', 'has_', 'can_', 'should_', 'was_', 'will_', 'did_'])) {
+            return 'boolean';
+        }
+
+        // URL fields
+        if (Str::endsWith($name, '_url') || $name === 'url') {
+            return 'string';
+        }
+
+        // Email fields
+        if (Str::endsWith($name, '_email') || $name === 'email') {
+            return 'string';
+        }
+
+        // Name fields
+        if (Str::endsWith($name, '_name') || $name === 'name' || $name === 'title' || $name === 'label') {
+            return 'string';
+        }
+
+        // Description/content fields
+        if (in_array($name, ['description', 'content', 'body', 'text', 'message', 'bio', 'summary'])) {
+            return 'string';
+        }
+
+        // Price/amount fields
+        if (Str::endsWith($name, ['_price', '_amount', '_total', '_balance', '_cost'])) {
+            return 'number';
+        }
+
+        // Percentage fields
+        if (Str::endsWith($name, ['_percent', '_percentage', '_rate'])) {
+            return 'number';
+        }
+
+        return null;
+    }
+
+    /**
+     * Convert a PHP type hint to TypeScript type.
+     */
+    protected function phpTypeToTypeScript(string $phpType): string
+    {
+        // Remove nullable indicator
+        $isNullable = Str::startsWith($phpType, '?');
+        $phpType = ltrim($phpType, '?');
+
+        // Handle array types
+        if (Str::endsWith($phpType, '[]')) {
+            $innerType = substr($phpType, 0, -2);
+            $tsInnerType = $this->phpTypeToTypeScript($innerType);
+            return "{$tsInnerType}[]";
+        }
+
+        // Handle common PHP types
+        $typeMap = [
+            'int' => 'number',
+            'integer' => 'number',
+            'float' => 'number',
+            'double' => 'number',
+            'bool' => 'boolean',
+            'boolean' => 'boolean',
+            'string' => 'string',
+            'array' => 'unknown[]',
+            'object' => 'Record<string, unknown>',
+            'mixed' => 'unknown',
+            'null' => 'null',
+            'void' => 'void',
+            'DateTime' => 'string',
+            '\\DateTime' => 'string',
+            'DateTimeInterface' => 'string',
+            '\\DateTimeInterface' => 'string',
+            'Carbon' => 'string',
+            'Carbon\\Carbon' => 'string',
+            '\\Carbon\\Carbon' => 'string',
+            'Illuminate\\Support\\Carbon' => 'string',
+            '\\Illuminate\\Support\\Carbon' => 'string',
+            'Collection' => 'unknown[]',
+            'Illuminate\\Support\\Collection' => 'unknown[]',
+        ];
+
+        if (isset($typeMap[$phpType])) {
+            return $typeMap[$phpType];
+        }
+
+        // Check if it's a Resource class
+        if (Str::endsWith($phpType, 'Resource')) {
+            // Strip namespace if present
+            $parts = explode('\\', $phpType);
+            return end($parts);
+        }
+
+        // Default for unknown types
+        return config('typescript-models.unknown_type_fallback', 'unknown');
+    }
+
+    /**
+     * Convert a PHP cast type to TypeScript type.
+     */
+    protected function phpCastToTypeScript(string $cast): string
+    {
+        return match ($cast) {
+            'bool', 'boolean' => 'boolean',
+            'int', 'integer' => 'number',
+            'float', 'double', 'real' => 'number',
+            'string' => 'string',
+            'array' => 'unknown[]',
+            default => 'unknown',
+        };
     }
 
     /**
@@ -571,7 +1226,7 @@ TS;
 
                 $properties[] = [
                     'name' => $key,
-                    'type' => 'any',
+                    'type' => config('typescript-models.unknown_type_fallback', 'unknown'),
                     'nullable' => true,
                 ];
             }
@@ -587,8 +1242,10 @@ TS;
      */
     protected function inferTypeFromValue(mixed $value): string
     {
+        $fallback = config('typescript-models.unknown_type_fallback', 'unknown');
+
         if (is_null($value)) {
-            return 'any';
+            return $fallback;
         }
 
         if (is_bool($value)) {
@@ -605,15 +1262,18 @@ TS;
 
         if (is_array($value)) {
             if (empty($value)) {
-                return 'any[]';
+                return "{$fallback}[]";
             }
 
             // Check if it's an associative array (object) or sequential array
             if (array_keys($value) !== range(0, count($value) - 1)) {
-                return 'Record<string, any>';
+                return "Record<string, {$fallback}>";
             }
 
-            return 'any[]';
+            // Try to infer type from first element
+            $firstValue = reset($value);
+            $elementType = $this->inferTypeFromValue($firstValue);
+            return "{$elementType}[]";
         }
 
         if (is_object($value)) {
@@ -625,7 +1285,7 @@ TS;
                 }
             }
 
-            return 'Record<string, any>';
+            return "Record<string, {$fallback}>";
         }
 
         return 'string';

@@ -54,6 +54,19 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Include Models
+    |--------------------------------------------------------------------------
+    |
+    | Whether to generate TypeScript interfaces from Eloquent Models.
+    | By default, this is disabled because Resources are the recommended
+    | source of truth for frontend types (they represent the actual API shape).
+    | Enable this if you need direct Model types for internal tools or admin panels.
+    |
+    */
+    'include_models' => env('TYPESCRIPT_MODELS_INCLUDE_MODELS', false),
+
+    /*
+    |--------------------------------------------------------------------------
     | Models Configuration
     |--------------------------------------------------------------------------
     |
@@ -185,4 +198,61 @@ return [
     |
     */
     'generate_zod_schemas' => env('TYPESCRIPT_MODELS_GENERATE_ZOD_SCHEMAS', false),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Resource Type Inference
+    |--------------------------------------------------------------------------
+    |
+    | Enable intelligent type inference for Resources to avoid 'any' types.
+    | When enabled, the package will try to infer types from:
+    | - PHPDoc @property annotations on the Resource class
+    | - Static analysis of the toArray() method
+    | - The underlying Model's casts and properties
+    |
+    */
+    'infer_resource_types' => env('TYPESCRIPT_MODELS_INFER_TYPES', true),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Unknown Type Fallback
+    |--------------------------------------------------------------------------
+    |
+    | What type to use when inference fails:
+    | - 'unknown': TypeScript's unknown type (safest, requires type checks)
+    | - 'any': TypeScript's any type (flexible but less safe)
+    | - 'never': Strict mode, will cause compile errors if used
+    |
+    */
+    'unknown_type_fallback' => env('TYPESCRIPT_MODELS_UNKNOWN_FALLBACK', 'unknown'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Split by Domain
+    |--------------------------------------------------------------------------
+    |
+    | Split the generated TypeScript files by domain/module.
+    | This helps with large codebases by organizing types into separate files.
+    |
+    | Options:
+    | - false: Generate a single file (default)
+    | - 'subdirectory': Split based on subdirectory structure
+    |   (App\Http\Resources\Users\UserResource -> users.ts)
+    | - 'class': Split based on class name prefix
+    |   (UserResource, UserSummaryResource -> user.ts)
+    |
+    */
+    'split_by_domain' => env('TYPESCRIPT_MODELS_SPLIT_BY_DOMAIN', false),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Domain Detection Mode
+    |--------------------------------------------------------------------------
+    |
+    | How to detect the domain for split-by-domain feature:
+    | - 'subdirectory': Use first subdirectory after base path
+    | - 'class_basename': Group by class name prefix (e.g., User*, Order*)
+    |
+    */
+    'domain_detection' => env('TYPESCRIPT_MODELS_DOMAIN_DETECTION', 'subdirectory'),
 ];
