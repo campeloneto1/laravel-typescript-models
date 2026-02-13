@@ -420,18 +420,40 @@ TS;
         }
 
         if ($mode === 'class') {
-            // Group by class name prefix (e.g., UserResource -> user)
+            // Group by matching against discovered model names
             $className = class_basename($class);
 
             // Remove common suffixes
-            $className = preg_replace('/(Resource|Request|Model)$/', '', $className);
+            $cleanName = preg_replace('/(Resource|Request|Model)$/', '', $className);
 
-            // Extract the main entity name (first word in PascalCase)
-            if (preg_match('/^([A-Z][a-z]+)/', $className, $matches)) {
-                return Str::snake($matches[1]);
+            // Remove HTTP verb prefixes (Store, Update, Delete, Index, Show, Create, Destroy)
+            $cleanName = preg_replace('/^(Store|Update|Delete|Index|Show|Create|Destroy)/', '', $cleanName);
+
+            // If after removing prefixes we have nothing, use original without suffix
+            if (empty($cleanName)) {
+                $cleanName = preg_replace('/(Resource|Request|Model)$/', '', $className);
             }
 
-            return Str::snake($className);
+            // Try to match against discovered model names
+            $modelNames = array_map('class_basename', $this->discoveredModels);
+            usort($modelNames, fn($a, $b) => strlen($b) - strlen($a)); // Sort by length desc (TripUser before User/Trip)
+
+            // Priority 1: Exact match (TripUser == TripUser)
+            foreach ($modelNames as $modelName) {
+                if (strcasecmp($cleanName, $modelName) === 0) {
+                    return Str::snake($modelName);
+                }
+            }
+
+            // Priority 2: Exact match with plural (TripUsers == TripUser)
+            foreach ($modelNames as $modelName) {
+                if (strcasecmp($cleanName, $modelName . 's') === 0 || strcasecmp($cleanName . 's', $modelName) === 0) {
+                    return Str::snake($modelName);
+                }
+            }
+
+            // No model match found, use the clean name as-is
+            return Str::snake($cleanName);
         }
 
         return 'default';

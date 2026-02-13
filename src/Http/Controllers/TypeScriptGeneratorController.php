@@ -910,8 +910,8 @@ class TypeScriptGeneratorController extends Controller
                             <span class="radio-mark"></span>
                         </div>
                         <div class="option-content">
-                            <span class="option-label">Split by Entity <span class="badge badge-green">.zip</span></span>
-                            <span class="option-desc">Grouped by entity name (User, Product...)</span>
+                            <span class="option-label">Split by Model <span class="badge badge-green">.zip</span></span>
+                            <span class="option-desc">Grouped by Model name (UserResource, StoreUserRequest → user.ts)</span>
                         </div>
                     </label>
                 </div>

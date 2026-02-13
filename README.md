@@ -236,7 +236,33 @@ export * from './default';
 | Mode | Description | Example |
 |------|-------------|---------|
 | `subdirectory` | Uses namespace subdirectory | `Resources\Users\` → `users.ts` |
-| `class` | Groups by class name prefix | `UserResource` → `user.ts` |
+| `class` | Groups by matching Model names | `UserResource`, `StoreUserRequest` → `user.ts` |
+
+### Class Mode (Entity Matching)
+
+The `class` mode intelligently groups interfaces by matching against your discovered Models:
+
+```bash
+php artisan typescript:generate --split-by=class --output=resources/types/
+```
+
+**How it works:**
+
+1. Discovers all your Eloquent Models (`User`, `Post`, `PostLike`, etc.)
+2. For each Resource/Request, removes suffixes (`Resource`, `Request`) and HTTP verb prefixes (`Store`, `Update`, `Delete`, `Index`, `Show`, `Create`, `Destroy`)
+3. Matches the clean name against Model names (exact match or plural match)
+
+**Examples:**
+
+| Class | Clean Name | Matched Model | Output File |
+|-------|------------|---------------|-------------|
+| `UserResource` | `User` | `User` | `user.ts` |
+| `StoreUserRequest` | `User` | `User` | `user.ts` |
+| `DeletePostLikeRequest` | `PostLike` | `PostLike` | `post_like.ts` |
+| `PostLikesResource` | `PostLikes` | `PostLike` (plural) | `post_like.ts` |
+| `TripUserResource` | `TripUser` | `TripUser` | `trip_user.ts` |
+
+> **Note:** The matching is exact to avoid conflicts. For example, with Models `User`, `Trip`, and `TripUser`, the class `TripUserRequest` will correctly match `TripUser` (not `User` or `Trip`).
 
 ---
 
